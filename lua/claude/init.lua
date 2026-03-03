@@ -14,6 +14,7 @@ M.header_buf = nil
 M.header_win = nil
 M.job_id = nil
 M.prev_win = nil  -- Window to return to when exiting terminal mode
+M.scroll_mode = false  -- Track if we're in scroll mode
 
 --- Force cleanup of the terminal job and buffers
 local function force_cleanup()
@@ -45,6 +46,7 @@ local function force_cleanup()
     pcall(vim.api.nvim_buf_delete, M.header_buf, { force = true, unload = false })
     M.header_buf = nil
   end
+  M.scroll_mode = false
 end
 
 --- Setup the plugin with user options
@@ -90,8 +92,12 @@ function M.is_open()
   return M.win ~= nil and vim.api.nvim_win_is_valid(M.win)
 end
 
---- Open Claude Code in a right-side split
-function M.open()
+--- Open an AI agent in a right-side split
+---@param command string|nil Optional command to run (defaults to config.command)
+function M.open(command)
+  -- Use provided command or fall back to config default
+  local cmd = command or M.config.command
+
   -- If already open, focus it
   if M.is_open() then
     vim.api.nvim_set_current_win(M.win)
@@ -111,7 +117,7 @@ function M.open()
 
   -- Create the header buffer with instructions
   M.header_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(M.header_buf, 0, -1, false, { "Press <C-\\><C-n> to return to editor" })
+  vim.api.nvim_buf_set_lines(M.header_buf, 0, -1, false, { "<C-\\><C-n> return to editor | <C-\\><C-s> scroll mode (i to resume)" })
   vim.api.nvim_set_option_value("modifiable", false, { buf = M.header_buf })
   vim.api.nvim_set_option_value("buftype", "nofile", { buf = M.header_buf })
   vim.api.nvim_win_set_buf(main_win, M.header_buf)
@@ -142,8 +148,8 @@ function M.open()
   -- Set buffer options before starting terminal
   vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = M.buf })
 
-  -- Start the terminal with claude
-  M.job_id = vim.fn.termopen(M.config.command, {
+  -- Start the terminal with the AI agent
+  M.job_id = vim.fn.termopen(cmd, {
     on_exit = function()
       M.job_id = nil
       M.close()
@@ -151,13 +157,15 @@ function M.open()
   })
 
   -- Set buffer name for identification
-  vim.api.nvim_buf_set_name(M.buf, "claude")
+  vim.api.nvim_buf_set_name(M.buf, "agent:" .. cmd)
 
-  -- Auto-enter insert mode when entering the Claude window
+  -- Auto-enter insert mode when entering the Claude window (unless in scroll mode)
   vim.api.nvim_create_autocmd("BufEnter", {
     buffer = M.buf,
     callback = function()
-      vim.cmd("startinsert")
+      if not M.scroll_mode then
+        vim.cmd("startinsert")
+      end
     end,
     desc = "Auto-enter terminal mode when focusing Claude window",
   })
@@ -168,10 +176,29 @@ function M.open()
     callback = function()
       -- Exit terminal mode
       vim.cmd("stopinsert")
+      M.scroll_mode = false
       -- Return to previous window if it's still valid
       if M.prev_win and vim.api.nvim_win_is_valid(M.prev_win) then
         vim.api.nvim_set_current_win(M.prev_win)
       end
+    end,
+  })
+
+  -- Add keymap to enter scroll mode (stay in Claude window)
+  vim.api.nvim_buf_set_keymap(M.buf, "t", "<C-\\><C-s>", "", {
+    noremap = true,
+    callback = function()
+      M.scroll_mode = true
+      vim.cmd("stopinsert")
+    end,
+  })
+
+  -- Add keymap to exit scroll mode and resume terminal interaction
+  vim.api.nvim_buf_set_keymap(M.buf, "n", "i", "", {
+    noremap = true,
+    callback = function()
+      M.scroll_mode = false
+      vim.cmd("startinsert")
     end,
   })
 
@@ -184,12 +211,13 @@ function M.close()
   force_cleanup()
 end
 
---- Toggle the Claude window
-function M.toggle()
+--- Toggle the AI agent window
+---@param command string|nil Optional command to run (defaults to config.command)
+function M.toggle(command)
   if M.is_open() then
     M.close()
   else
-    M.open()
+    M.open(command)
   end
 end
 
