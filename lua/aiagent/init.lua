@@ -8,15 +8,105 @@ M.config = {
   named_commands = {
     Cursor = "cursor-agent",
   },
+  auto_send_context = false, -- Automatically send new buffer context when entering terminal
 }
 
 -- Track agents and windows
-M.agents = {}           -- { name = { buf, job_id, scroll_mode, command } }
+M.agents = {}           -- { name = { buf, job_id, scroll_mode, command, sent_files } }
 M.current_agent = nil   -- name of active agent
 M.win = nil             -- shared terminal window
 M.header_buf = nil      -- shared header buffer
 M.header_win = nil      -- shared header window
 M.prev_win = nil        -- Window to return to when exiting terminal mode
+
+--- Get file paths of all open buffers (excluding special buffers)
+---@return string[] List of absolute file paths
+local function get_open_buffer_files()
+  local files = {}
+  local seen = {}
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local buftype = vim.api.nvim_get_option_value("buftype", { buf = bufnr })
+      -- Only include normal file buffers (not terminals, help, etc.)
+      if buftype == "" then
+        local name = vim.api.nvim_buf_get_name(bufnr)
+        if name ~= "" and not seen[name] then
+          -- Check if it's an actual file (not a directory or special path)
+          local stat = vim.loop.fs_stat(name)
+          if stat and stat.type == "file" then
+            seen[name] = true
+            table.insert(files, name)
+          end
+        end
+      end
+    end
+  end
+  return files
+end
+
+--- Get list of open buffer files not yet sent to an agent
+---@param agent_name string Agent name
+---@return string[] List of new file paths
+local function get_unsent_buffer_files(agent_name)
+  local agent = M.agents[agent_name]
+  if not agent then
+    return {}
+  end
+
+  local sent = agent.sent_files or {}
+  local all_files = get_open_buffer_files()
+  local new_files = {}
+
+  for _, file in ipairs(all_files) do
+    if not sent[file] then
+      table.insert(new_files, file)
+    end
+  end
+
+  return new_files
+end
+
+--- Send text to the terminal (types it as if user typed it)
+---@param agent_name string Agent name
+---@param text string Text to send
+local function send_to_terminal(agent_name, text)
+  local agent = M.agents[agent_name]
+  if not agent or not agent.job_id then
+    return
+  end
+  vim.fn.chansend(agent.job_id, text)
+end
+
+--- Get the current visual selection
+---@return string[] lines, string filetype
+local function get_visual_selection()
+  -- Get the visual selection marks
+  local start_pos = vim.fn.getpos("'<")
+  local end_pos = vim.fn.getpos("'>")
+  local start_line = start_pos[2]
+  local end_line = end_pos[2]
+
+  -- Get the lines
+  local lines = vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, false)
+
+  -- Handle partial line selection for visual mode (not line-wise)
+  local mode = vim.fn.visualmode()
+  if mode == "v" then
+    -- Character-wise visual mode
+    local start_col = start_pos[3]
+    local end_col = end_pos[3]
+    if #lines == 1 then
+      lines[1] = string.sub(lines[1], start_col, end_col)
+    else
+      lines[1] = string.sub(lines[1], start_col)
+      lines[#lines] = string.sub(lines[#lines], 1, end_col)
+    end
+  end
+  -- For 'V' (line-wise) and '<C-v>' (block), we keep full lines
+
+  local filetype = vim.bo.filetype
+  return lines, filetype
+end
 
 --- Force cleanup of a single agent
 ---@param name string Agent name to clean up
@@ -169,7 +259,7 @@ local function update_header()
 
   local lines = {
     "Agent: " .. current .. agent_list,
-    "<C-\\><C-n> return to editor | <C-\\><C-s> scroll mode (i to resume)",
+    "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-c> send context",
     "<C-\\><C-a> cycle agents | :AgentList to see all",
   }
 
@@ -281,6 +371,7 @@ local function create_agent(name, cmd)
     job_id = nil,
     scroll_mode = false,
     command = cmd,
+    sent_files = {},  -- Track which files have been sent as context
   }
 
   -- Show buffer in window and switch to it before starting terminal
@@ -304,11 +395,16 @@ local function create_agent(name, cmd)
   vim.api.nvim_buf_set_name(buf, "agent:" .. name)
 
   -- Auto-enter insert mode when entering this buffer (unless in scroll mode)
+  -- Also optionally auto-send context for new buffers
   vim.api.nvim_create_autocmd("BufEnter", {
     buffer = buf,
     callback = function()
       local agent = M.agents[name]
       if agent and not agent.scroll_mode then
+        -- Auto-send context if enabled
+        if M.config.auto_send_context then
+          M.send_context(name)
+        end
         vim.cmd("startinsert")
       end
     end,
@@ -359,6 +455,19 @@ local function create_agent(name, cmd)
     noremap = true,
     callback = function()
       M.next_agent()
+    end,
+  })
+
+  -- Add keymap to send buffer context
+  vim.api.nvim_buf_set_keymap(buf, "t", "<C-\\><C-c>", "", {
+    noremap = true,
+    callback = function()
+      local count = M.send_context(name)
+      if count > 0 then
+        vim.notify("Sent " .. count .. " file(s) as context", vim.log.levels.INFO)
+      else
+        vim.notify("No new files to send", vim.log.levels.INFO)
+      end
     end,
   })
 
@@ -479,6 +588,125 @@ function M.toggle(name, command)
   else
     M.open(agent_name, command)
   end
+end
+
+--- Send open buffer context to the current agent
+--- Uses @file syntax for Claude Code to read the files
+---@param agent_name string|nil Agent name (defaults to current)
+---@return number Number of new files sent
+function M.send_context(agent_name)
+  local name = agent_name or M.current_agent
+  if not name then
+    vim.notify("No agent active", vim.log.levels.WARN)
+    return 0
+  end
+
+  local agent = M.agents[name]
+  if not agent or not agent.job_id then
+    vim.notify("Agent '" .. name .. "' not running", vim.log.levels.WARN)
+    return 0
+  end
+
+  local new_files = get_unsent_buffer_files(name)
+  if #new_files == 0 then
+    return 0
+  end
+
+  -- Build @file references for Claude Code
+  local refs = {}
+  for _, file in ipairs(new_files) do
+    table.insert(refs, "@" .. file)
+    agent.sent_files[file] = true
+  end
+
+  -- Send file references to the terminal
+  local text = table.concat(refs, " ") .. " "
+  send_to_terminal(name, text)
+
+  return #new_files
+end
+
+--- Get count of unsent buffer files for the current agent
+---@param agent_name string|nil Agent name (defaults to current)
+---@return number
+function M.pending_context_count(agent_name)
+  local name = agent_name or M.current_agent
+  if not name then
+    return 0
+  end
+  return #get_unsent_buffer_files(name)
+end
+
+--- Reset sent files tracking for an agent (to re-send all context)
+---@param agent_name string|nil Agent name (defaults to current)
+function M.reset_context(agent_name)
+  local name = agent_name or M.current_agent
+  if not name then
+    return
+  end
+  local agent = M.agents[name]
+  if agent then
+    agent.sent_files = {}
+    vim.notify("Context reset for agent '" .. name .. "'", vim.log.levels.INFO)
+  end
+end
+
+--- Send visual selection to the agent terminal
+--- Opens the agent if not already open
+---@param agent_name string|nil Agent name (defaults to current or "AIAgent")
+function M.send_selection(agent_name)
+  -- Get selection before we switch windows (marks may change)
+  local lines, filetype = get_visual_selection()
+  if #lines == 0 or (#lines == 1 and lines[1] == "") then
+    vim.notify("No text selected", vim.log.levels.WARN)
+    return
+  end
+
+  -- Determine which agent to use
+  local name = agent_name or M.current_agent or "AIAgent"
+
+  -- Open agent if not running
+  if not M.agents[name] then
+    M.open(name)
+    -- Give terminal time to initialize
+    vim.defer_fn(function()
+      M.send_selection_to_agent(name, lines, filetype)
+    end, 100)
+    return
+  end
+
+  -- If window isn't open, open it
+  if not M.is_open() then
+    M.open(name)
+  end
+
+  M.send_selection_to_agent(name, lines, filetype)
+end
+
+--- Internal: send selection lines to a running agent
+---@param name string Agent name
+---@param lines string[] Selected lines
+---@param filetype string Filetype of the source buffer
+function M.send_selection_to_agent(name, lines, filetype)
+  local agent = M.agents[name]
+  if not agent or not agent.job_id then
+    vim.notify("Agent '" .. name .. "' not running", vim.log.levels.ERROR)
+    return
+  end
+
+  -- Format as markdown code block
+  local ft = filetype ~= "" and filetype or "text"
+  local code_block = "```" .. ft .. "\n" .. table.concat(lines, "\n") .. "\n```\n"
+
+  -- Send to terminal
+  send_to_terminal(name, code_block)
+
+  -- Switch to the agent and enter insert mode
+  M.current_agent = name
+  vim.api.nvim_win_set_buf(M.win, agent.buf)
+  vim.api.nvim_set_current_win(M.win)
+  update_header()
+  vim.cmd("startinsert")
 end
 
 return M
