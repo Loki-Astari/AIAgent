@@ -4,20 +4,32 @@ local M = {}
 -- Default configuration
 M.config = {
   width = 0.4,         -- Width as percentage (0-1) or columns (>1)
-  command = "claude",  -- Command to run (default: "claude")
-  named_commands = {
-    Cursor = "cursor-agent",
-  },
+  default_agent = "claude", -- Symbolic agent name to use on startup
   auto_send_context = false, -- Automatically send new buffer context when entering terminal
+  colors = { "blue", "green", "yellow", "red", "magenta", "cyan", "orange", "purple" },
+  -- Map of symbolic names to CLI executables. Extend this in setup() for custom agents.
+  known_agents = {
+    claude  = "claude",        -- Anthropic Claude Code
+    cursor  = "cursor-agent",  -- Cursor AI
+    aider   = "aider",         -- Aider (aider-chat)
+    gemini  = "gemini",        -- Google Gemini CLI
+    codex   = "codex",         -- OpenAI Codex CLI
+    goose   = "goose",         -- Block's Goose agent
+    plandex = "plandex",       -- Plandex
+    cody    = "cody",          -- Sourcegraph Cody
+    amp     = "amp",           -- Amp
+  },
 }
 
 -- Track agents and windows
-M.agents = {}           -- { name = { buf, job_id, scroll_mode, command, sent_files } }
+M.agents = {}           -- { name = { buf, job_id, scroll_mode, agent_type, command, sent_files, color, worktree } }
 M.current_agent = nil   -- name of active agent
+M.current_agent_type = "claude"  -- symbolic agent name used for new agents
 M.win = nil             -- shared terminal window
 M.header_buf = nil      -- shared header buffer
 M.header_win = nil      -- shared header window
 M.prev_win = nil        -- Window to return to when exiting terminal mode
+M.color_index = 0       -- Counter for cycling through colors
 
 --- Get file paths of all open buffers (excluding special buffers)
 ---@return string[] List of absolute file paths
@@ -130,6 +142,11 @@ local function cleanup_agent(name)
     pcall(vim.api.nvim_buf_delete, agent.buf, { force = true, unload = false })
   end
 
+  -- Remove git worktree if one was created for this agent
+  if agent.worktree then
+    vim.fn.system("git worktree remove " .. vim.fn.shellescape(agent.worktree) .. " --force")
+  end
+
   M.agents[name] = nil
 end
 
@@ -159,10 +176,27 @@ local function force_cleanup()
   end
 end
 
+--- Set the active agent type for subsequent AgentOpen calls
+---@param symbolic_name string Symbolic agent name (e.g. "claude", "cursor", "aider")
+function M.set(symbolic_name)
+  local cmd = M.config.known_agents[symbolic_name]
+  if not cmd then
+    local available = table.concat(vim.tbl_keys(M.config.known_agents), ", ")
+    vim.notify(
+      "Unknown agent '" .. symbolic_name .. "'. Known agents: " .. available,
+      vim.log.levels.WARN
+    )
+  end
+  M.current_agent_type = symbolic_name
+  local resolved = cmd or symbolic_name
+  vim.notify("Agent set to: " .. symbolic_name .. " (" .. resolved .. ")", vim.log.levels.INFO)
+end
+
 --- Setup the plugin with user options
 ---@param opts table|nil Configuration options
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+  M.current_agent_type = M.config.default_agent
 
   -- Handle quit commands - clean up before Neovim checks for running jobs
   vim.api.nvim_create_autocmd("QuitPre", {
@@ -196,38 +230,11 @@ local function get_width()
   end
 end
 
---- Resolve command to run for an agent name
----@param agent_name string
----@param command string|nil
+--- Get the CLI executable for the current agent type
 ---@return string
-local function resolve_command(agent_name, command)
-  if command ~= nil and command ~= "" then
-    return command
-  end
-
-  if type(agent_name) == "string" and agent_name:lower() == "cursor" then
-    if vim.fn.executable("cursor-agent") == 1 then
-      return "cursor-agent"
-    end
-    if vim.fn.executable("cursor") == 1 then
-      return "cursor"
-    end
-  end
-
-  local map = M.config.named_commands
-  if type(map) == "table" then
-    local by_exact = map[agent_name]
-    if type(by_exact) == "string" and by_exact ~= "" then
-      return by_exact
-    end
-
-    local by_lower = map[agent_name:lower()]
-    if type(by_lower) == "string" and by_lower ~= "" then
-      return by_lower
-    end
-  end
-
-  return M.config.command
+local function get_command()
+  local cmd = M.config.known_agents[M.current_agent_type]
+  return cmd or M.current_agent_type  -- fallback: treat symbolic name as executable
 end
 
 --- Get list of agent names
@@ -357,8 +364,16 @@ end
 
 --- Create a new agent
 ---@param name string Agent name
----@param cmd string Command to run
-local function create_agent(name, cmd)
+---@param cwd string|nil Working directory (defaults to current)
+local function create_agent(name, cwd)
+  local cmd = get_command()
+  local agent_type = M.current_agent_type
+
+  -- Pick the next color from the cycle
+  local colors = M.config.colors
+  M.color_index = M.color_index + 1
+  local color = colors[((M.color_index - 1) % #colors) + 1]
+
   -- Create a new buffer for the terminal
   local buf = vim.api.nvim_create_buf(false, true)
 
@@ -370,8 +385,11 @@ local function create_agent(name, cmd)
     buf = buf,
     job_id = nil,
     scroll_mode = false,
+    agent_type = agent_type,
     command = cmd,
     sent_files = {},  -- Track which files have been sent as context
+    color = color,
+    worktree = nil,   -- Set by open_in_worktree if applicable
   }
 
   -- Show buffer in window and switch to it before starting terminal
@@ -379,15 +397,28 @@ local function create_agent(name, cmd)
   vim.api.nvim_win_set_buf(M.win, buf)
   vim.api.nvim_set_current_win(M.win)
 
-  -- Start the terminal with the AI agent
-  local job_id = vim.fn.termopen(cmd, {
+  -- Build termopen options
+  local term_opts = {
     on_exit = function()
       if M.agents[name] then
         M.agents[name].job_id = nil
       end
       M.close(name)
     end,
-  })
+  }
+  if cwd and cwd ~= "" then
+    term_opts.cwd = cwd
+  end
+
+  -- Start the terminal with the AI agent
+  local job_id = vim.fn.termopen(cmd, term_opts)
+
+  -- Send /color command after the agent has had time to start
+  vim.defer_fn(function()
+    if M.agents[name] and M.agents[name].job_id then
+      vim.fn.chansend(M.agents[name].job_id, "/color " .. color .. "\r")
+    end
+  end, 1500)
 
   M.agents[name].job_id = job_id
 
@@ -474,22 +505,66 @@ local function create_agent(name, cmd)
   return buf
 end
 
+--- Create a git worktree for an agent and return its path, or nil on failure
+---@param agent_name string
+---@return string|nil
+local function create_worktree(agent_name)
+  local git_root = vim.fn.system("git rev-parse --show-toplevel 2>/dev/null"):gsub("\n", "")
+  if vim.v.shell_error ~= 0 or git_root == "" then
+    vim.notify("Not in a git repository", vim.log.levels.ERROR)
+    return nil
+  end
+
+  local slug = agent_name:lower():gsub("[^%w]", "-")
+  local worktree_path = vim.fn.tempname() .. "-agent-" .. slug
+  local branch_name = "agent/" .. slug .. "-" .. os.time()
+
+  local result = vim.fn.system(
+    "git worktree add -b " .. vim.fn.shellescape(branch_name)
+    .. " " .. vim.fn.shellescape(worktree_path) .. " HEAD 2>&1"
+  )
+  if vim.v.shell_error ~= 0 then
+    vim.notify("Failed to create worktree:\n" .. result, vim.log.levels.ERROR)
+    return nil
+  end
+
+  vim.notify("Worktree created: " .. worktree_path .. " (branch: " .. branch_name .. ")", vim.log.levels.INFO)
+  return worktree_path
+end
+
 --- Open an AI agent in a right-side split
+--- The optional second argument controls the working directory:
+---   "-worktree"  auto-create a git worktree named after the agent
+---   <directory>  use that directory as the working directory
 ---@param name string|nil Agent name (defaults to "AIAgent")
----@param command string|nil Command to run (defaults to config.command or name-based default)
-function M.open(name, command)
-  -- Default name and command
+---@param arg2 string|nil "-worktree" or a directory path
+function M.open(name, arg2)
   local agent_name = name or "AIAgent"
-  local cmd = resolve_command(agent_name, command)
 
   -- If agent already exists, switch to it
   if M.agents[agent_name] then
     if not M.is_open() then
-      -- Window was closed but agent still exists, recreate window
       create_window_layout()
     end
     M.switch(agent_name)
     return
+  end
+
+  -- Resolve the working directory from the second argument
+  local cwd = nil
+  local worktree_path = nil
+  if arg2 == "-worktree" then
+    worktree_path = create_worktree(agent_name)
+    if not worktree_path then return end
+    cwd = worktree_path
+  elseif arg2 and arg2 ~= "" then
+    local stat = vim.loop.fs_stat(arg2)
+    if stat and stat.type == "directory" then
+      cwd = arg2
+    else
+      vim.notify("Not a directory: " .. arg2, vim.log.levels.ERROR)
+      return
+    end
   end
 
   -- Create window layout if not open
@@ -497,11 +572,14 @@ function M.open(name, command)
     create_window_layout()
   end
 
-  -- Create the new agent
-  create_agent(agent_name, cmd)
+  create_agent(agent_name, cwd)
   M.current_agent = agent_name
 
-  -- Update header and enter insert mode
+  -- Record the auto-created worktree so cleanup_agent can remove it
+  if worktree_path and M.agents[agent_name] then
+    M.agents[agent_name].worktree = worktree_path
+  end
+
   update_header()
   vim.cmd("startinsert")
 end
@@ -569,8 +647,8 @@ function M.print_list()
     for _, name in ipairs(names) do
       local marker = (name == current) and " *" or ""
       local agent = M.agents[name]
-      local cmd = agent and agent.command or "?"
-      table.insert(lines, name .. marker .. " (" .. cmd .. ")")
+      local agent_type = agent and agent.agent_type or "?"
+      table.insert(lines, name .. marker .. " [" .. agent_type .. "]")
     end
     vim.notify("Agents:\n" .. table.concat(lines, "\n"), vim.log.levels.INFO)
   end
@@ -578,15 +656,14 @@ end
 
 --- Toggle the AI agent window
 ---@param name string|nil Agent name (defaults to "AIAgent")
----@param command string|nil Optional command to run (defaults to config.command or name-based default)
-function M.toggle(name, command)
+function M.toggle(name)
   local agent_name = name or "AIAgent"
 
   -- If this specific agent is open and visible, close it
   if M.is_open() and M.current_agent == agent_name then
     M.close(agent_name)
   else
-    M.open(agent_name, command)
+    M.open(agent_name)
   end
 end
 

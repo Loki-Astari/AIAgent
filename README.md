@@ -57,11 +57,12 @@ require("aiagent").setup()
 
 ```lua
 require("aiagent").setup({
-  width = 0.4,              -- Width as percentage (0-1) or absolute columns (>1)
-  command = "claude",       -- Command to run (default: "claude")
+  width = 0.4,               -- Width as percentage (0-1) or absolute columns (>1)
+  default_agent = "claude",  -- Symbolic agent name to use on startup
   auto_send_context = false, -- Auto-send open buffer paths when entering terminal
-  named_commands = {
-    Cursor = "cursor-agent", -- allows :AgentOpen Cursor with no 2nd argument
+  -- Extend or override the built-in agent → executable mapping
+  known_agents = {
+    mytool = "my-custom-cli",
   },
 })
 ```
@@ -72,9 +73,10 @@ require("aiagent").setup({
 
 | Command | Description |
 |---------|-------------|
-| `:AgentOpen [name] [command]` | Open an agent terminal (name defaults to `AIAgent`) |
+| `:AgentSet {agent}` | Set which agent CLI to use for new agents (e.g. `claude`, `cursor`) |
+| `:AgentOpen [name] [-worktree\|dir]` | Open an agent terminal (name defaults to `AIAgent`) |
 | `:AgentClose [name]` | Close an agent (defaults to current) |
-| `:AgentToggle [name] [command]` | Toggle an agent terminal |
+| `:AgentToggle [name]` | Toggle an agent terminal |
 | `:AgentSwitch {name}` | Switch to an existing agent by name |
 | `:AgentList` | Show running agents |
 | `:AgentCloseAll` | Close all agents |
@@ -82,10 +84,30 @@ require("aiagent").setup({
 | `:AgentResetContext` | Reset tracking to re-send all buffer paths |
 | `:'<,'>AgentSendSelection` | Send visual selection to the agent |
 
+### Supported agents
+
+| Name | CLI executable |
+|------|---------------|
+| `claude` | `claude` (Anthropic Claude Code) |
+| `cursor` | `cursor-agent` (Cursor AI) |
+| `aider` | `aider` |
+| `gemini` | `gemini` (Google Gemini CLI) |
+| `codex` | `codex` (OpenAI Codex CLI) |
+| `goose` | `goose` (Block's Goose) |
+| `plandex` | `plandex` |
+| `cody` | `cody` (Sourcegraph Cody) |
+| `amp` | `amp` |
+
 Examples:
 
-- `:AgentOpen` (runs `claude` by default; configure `command` to change it)
-- `:AgentOpen Cursor` (runs `cursor-agent` if available)
+```
+:AgentSet cursor              " switch to Cursor for new agents
+:AgentOpen                    " opens a Cursor agent named 'AIAgent'
+:AgentSet claude              " switch back to Claude
+:AgentOpen Review             " opens a Claude agent named 'Review'
+:AgentOpen Feature -worktree  " opens a Claude agent in a fresh worktree
+:AgentOpen Hotfix ~/trees/fix " opens a Claude agent in an existing directory
+```
 
 ### Keybindings
 
@@ -144,6 +166,32 @@ Select code in visual mode and send it to the agent to ask questions about speci
 4. The agent terminal is focused so you can type your question
 
 If no agent is running, one will be started automatically.
+
+## Git Worktree Support
+
+When starting a new agent on a separate task it can be useful to isolate it in its own git worktree, so its changes don't interfere with your current working tree.
+
+### Auto-create a worktree
+
+Pass `-worktree` as the second argument to `:AgentOpen`:
+
+```
+:AgentOpen Feature -worktree
+```
+
+This will:
+1. Create a new branch (`agent/feature-<timestamp>`) from the current `HEAD`
+2. Check it out into a temporary directory
+3. Start the agent with that directory as its working directory
+4. Remove the worktree automatically when the agent is closed
+
+### Use an existing directory
+
+Pass any directory path as the second argument and the agent will start there:
+
+```
+:AgentOpen Hotfix /path/to/existing/worktree
+```
 
 ## License
 
