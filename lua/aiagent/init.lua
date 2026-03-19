@@ -233,8 +233,11 @@ function M.setup(opts)
       local rel_path = filepath:sub(#agent.git_root + 2)
       local wt_path  = agent.worktree .. "/" .. rel_path
 
-      -- Rename the buffer before Neovim reads it; the read will use the new path
+      -- Rename the buffer before Neovim reads it; the read will use the new path.
+      -- Tag it with the agent name so bufferline_name_formatter can prefix the tab.
       vim.api.nvim_buf_set_name(args.buf, wt_path)
+      vim.b[args.buf].aiagent_name = M.current_agent
+      vim.notify("Worktree [" .. M.current_agent .. "]: " .. rel_path, vim.log.levels.INFO)
     end,
     desc = "Redirect :e to the active agent's worktree when applicable",
   })
@@ -751,6 +754,19 @@ end
 --- Close all agents and window
 function M.close_all()
   force_cleanup()
+end
+
+--- bufferline name_formatter callback.
+--- Returns "AgentName: filename" for worktree-redirected buffers, nil otherwise.
+--- Usage in bufferline setup:
+---   options = { name_formatter = require('aiagent').bufferline_name_formatter, ... }
+---@param buf { name: string, path: string, bufnr: number }
+---@return string|nil
+function M.bufferline_name_formatter(buf)
+  local ok, agent_name = pcall(function() return vim.b[buf.bufnr].aiagent_name end)
+  if ok and agent_name then
+    return agent_name .. ": " .. vim.fn.fnamemodify(buf.path, ":t")
+  end
 end
 
 --- Get list of running agents
