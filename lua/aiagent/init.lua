@@ -25,7 +25,7 @@ M.config = {
 }
 
 -- Track agents and windows
-M.agents = {}           -- { name = { buf, job_id, scroll_mode, scroll_pos, agent_type, command, sent_files, color, worktree, git_root } }
+M.agents = {}           -- { name = { buf, job_id, scroll_mode, scroll_pos, agent_type, command, sent_files, color, worktree, git_root, slug } }
 M.current_agent = nil   -- name of active agent
 M.current_agent_type = "claude"  -- symbolic agent name used for new agents
 M.win = nil             -- shared terminal window
@@ -938,17 +938,20 @@ function M.open(name, wtname, directory)
   local cwd = nil
   local worktree_path = nil
   local worktree_git_root = nil
+  local worktree_slug = nil
 
   if wtname and wtname ~= "" then
     -- WTName provided: create or reconnect to the named worktree
     worktree_path, worktree_git_root = create_worktree(wtname, directory)
     if not worktree_path then return end
     cwd = worktree_path
+    worktree_slug = wtname:lower():gsub("[^%w]", "-")
   else
     -- No WTName: auto-reconnect to an existing worktree named after the agent
     worktree_path, worktree_git_root = find_agent_worktree(agent_name)
     if worktree_path then
       cwd = worktree_path
+      worktree_slug = agent_name:lower():gsub("[^%w]", "-")
       vim.notify("Reconnected to existing worktree for " .. agent_name, vim.log.levels.INFO)
     end
   end
@@ -964,6 +967,7 @@ function M.open(name, wtname, directory)
   if worktree_path and M.agents[agent_name] then
     M.agents[agent_name].worktree = worktree_path
     M.agents[agent_name].git_root = worktree_git_root
+    M.agents[agent_name].slug = worktree_slug
   end
 
   update_header()
@@ -1025,7 +1029,10 @@ end
 function M.bufferline_name_formatter(buf)
   local ok, agent_name = pcall(function() return vim.b[buf.bufnr].aiagent_name end)
   if ok and agent_name then
-    return agent_name .. ": " .. vim.fn.fnamemodify(buf.path, ":t")
+    local agent = M.agents[agent_name]
+    local prefix = agent and agent.slug
+    if not prefix then return nil end
+    return prefix .. ": " .. vim.fn.fnamemodify(buf.path, ":t")
   end
 end
 
