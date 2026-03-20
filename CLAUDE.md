@@ -41,12 +41,14 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 
 ## Architecture
 
-- `plugin/aiagent.vim` - VimScript entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, etc.)
+- `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, etc.)
 - `lua/aiagent/init.lua` - Main Lua module with all plugin logic
+- `lua/aiagent/health.lua` - Health check implementation (`:checkhealth aiagent`)
+- `doc/aiagent.txt` - Vimdoc help file (`:help aiagent`)
 
 The plugin manages state via module-level variables (`M.agents`, `M.current_agent`, `M.win`, `M.header_buf`, `M.header_win`, `M.prev_win`) and uses autocmds for cleanup on QuitPre/VimLeavePre.
 
-Each agent entry in `M.agents[name]` tracks: `buf`, `job_id`, `worktree` (path or nil), `git_root` (repo root or nil).
+Each agent entry in `M.agents[name]` tracks: `buf`, `job_id`, `scroll_mode`, `scroll_pos`, `agent_type`, `command`, `sent_files`, `color`, `worktree` (path or nil), `git_root` (repo root or nil), `slug` (worktree slug or nil).
 
 ## Key Patterns
 
@@ -77,18 +79,18 @@ Where `{slug}` is the `WTName` lowercased with non-alphanumeric characters repla
 
 ### Auto-reconnect logic
 
+Worktrees are found by matching the branch name `agent/{slug}` via `git worktree list --porcelain`. This is more reliable than path comparison (unaffected by symlinks or directory moves).
+
 On `:AgentOpen Name` (no `WTName`), the plugin:
-1. Derives a slug from `Name` and calls `git worktree list --porcelain` to scan for the expected path
-2. If found, reconnects silently and sets the agent's `cwd` to the worktree
+1. Derives a slug from `Name` and calls `git worktree list --porcelain` to scan for a worktree with branch `refs/heads/agent/{slug}`
+2. If found, reconnects silently and sets the agent's `cwd` to the worktree path from the porcelain output
 3. If not found, opens with the current directory (no worktree)
 
 On `:AgentOpen Name WTName [directory]`:
-1. Derives a slug from `WTName` and scans for an existing worktree
+1. Derives a slug from `WTName` and scans for a worktree with branch `refs/heads/agent/{slug}`
 2. If found and no `directory` given, reconnects; if found and `directory` given, errors
-3. If not found, creates a new worktree at `directory` (or the auto-generated path)
+3. If not found, creates a new worktree at `vim.fn.expand(directory)` if given, otherwise at `$TMPDIR/nvim-agent-{repo}-{slug}`
 4. Handles the edge case where the branch exists but the worktree directory was manually removed (uses `git worktree add <path> <branch>` without `-b`)
-
-Path comparison resolves symlinks on both sides to handle the macOS `/var` → `/private/var` symlink.
 
 ### Worktree file redirect
 
@@ -99,4 +101,13 @@ Two autocmds cooperate to redirect file opens to the active agent's worktree:
 
 ### Bufferline integration
 
-`M.bufferline_name_formatter(buf)` is a public function for use as bufferline's `name_formatter` option. It reads `vim.b[buf.bufnr].aiagent_name` and prefixes the filename: `AgentName: filename`. Returns `nil` (default name) for non-worktree buffers.
+`M.bufferline_name_formatter(buf)` is a public function for use as bufferline's `name_formatter` option. It reads `vim.b[buf.bufnr].aiagent_name`, looks up `M.agents[name].slug`, and prefixes the filename: `slug: filename`. Returns `nil` (default name) for non-worktree buffers or when the agent has no slug.
+
+### Scroll mode
+
+Press `<C-\><C-s>` in terminal mode to enter scroll mode (normal mode in the terminal buffer).
+
+- **First entry**: cursor jumps to `scroll_start_line` (config option, default `9`), skipping the agent's startup preamble
+- **Re-entry**: cursor is restored to `agent.scroll_pos` (saved as a `{ row, col }` copy when exiting scroll mode)
+
+The `scroll_pos` is stored as `{ pos[1], pos[2] }` (an explicit copy), not a reference, to avoid Lua table aliasing bugs with `nvim_win_get_cursor`.
