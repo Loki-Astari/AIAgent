@@ -705,7 +705,17 @@ local function create_agent(name, cwd)
       if agent then
         agent.scroll_mode = true
       end
+      local win = vim.api.nvim_get_current_win()
       vim.cmd("stopinsert")
+      vim.schedule(function()
+        if agent and agent.scroll_pos then
+          -- Re-entering: restore last scroll position
+          pcall(vim.api.nvim_win_set_cursor, win, agent.scroll_pos)
+        else
+          -- First time: go to top of buffer
+          pcall(vim.api.nvim_win_set_cursor, win, { 9, 0 })
+        end
+      end)
     end,
   })
 
@@ -716,6 +726,7 @@ local function create_agent(name, cwd)
       local agent = M.agents[name]
       if agent then
         agent.scroll_mode = false
+        agent.scroll_pos = vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win())
       end
       vim.cmd("startinsert")
     end,
