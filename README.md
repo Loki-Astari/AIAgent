@@ -60,6 +60,7 @@ require("aiagent").setup({
   width = 0.4,               -- Width as percentage (0-1) or absolute columns (>1)
   default_agent = "claude",  -- Symbolic agent name to use on startup
   auto_send_context = false, -- Auto-send open buffer paths when entering terminal
+  agent_startup_delay = 1500, -- ms to wait before sending /color on agent start
   -- Extend or override the built-in agent → executable mapping
   known_agents = {
     mytool = "my-custom-cli",

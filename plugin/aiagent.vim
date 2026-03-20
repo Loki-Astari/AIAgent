@@ -1,5 +1,5 @@
 " aiagent.nvim - AI agent integration for Neovim
-" Maintainer: Your Name
+" Maintainer: Loki-Astari
 " License: MIT
 
 if exists('g:loaded_aiagent')

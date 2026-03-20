@@ -6,6 +6,7 @@ M.config = {
   width = 0.4,         -- Width as percentage (0-1) or columns (>1)
   default_agent = "claude", -- Symbolic agent name to use on startup
   auto_send_context = false, -- Automatically send new buffer context when entering terminal
+  agent_startup_delay = 1500, -- Milliseconds to wait before sending /color command on startup
   colors = { "blue", "green", "yellow", "red", "magenta", "cyan", "orange", "purple" },
   -- Map of symbolic names to CLI executables. Extend this in setup() for custom agents.
   known_agents = {
@@ -44,7 +45,7 @@ local function get_open_buffer_files()
         local name = vim.api.nvim_buf_get_name(bufnr)
         if name ~= "" and not seen[name] then
           -- Check if it's an actual file (not a directory or special path)
-          local stat = vim.loop.fs_stat(name)
+          local stat = vim.uv.fs_stat(name)
           if stat and stat.type == "file" then
             seen[name] = true
             table.insert(files, name)
@@ -171,6 +172,18 @@ local function force_cleanup()
   end
 end
 
+--- Return true if child is exactly parent or is directly under it.
+--- Guards against false positives where parent is a byte-prefix of an unrelated sibling
+--- (e.g. "/tmp/nvim-agent-foo" must not match "/tmp/nvim-agent-foobar/file").
+---@param child string Absolute path (no trailing slash)
+---@param parent string Absolute path (no trailing slash)
+---@return boolean
+local function is_under(child, parent)
+  if #child < #parent then return false end
+  if child:sub(1, #parent) ~= parent then return false end
+  return #child == #parent or child:sub(#parent + 1, #parent + 1) == "/"
+end
+
 --- Set the active agent type for subsequent AgentOpen calls
 ---@param symbolic_name string Symbolic agent name (e.g. "claude", "cursor", "aider")
 function M.set(symbolic_name)
@@ -181,10 +194,10 @@ function M.set(symbolic_name)
       "Unknown agent '" .. symbolic_name .. "'. Known agents: " .. available,
       vim.log.levels.WARN
     )
+    return
   end
   M.current_agent_type = symbolic_name
-  local resolved = cmd or symbolic_name
-  vim.notify("Agent set to: " .. symbolic_name .. " (" .. resolved .. ")", vim.log.levels.INFO)
+  vim.notify("Agent set to: " .. symbolic_name .. " (" .. cmd .. ")", vim.log.levels.INFO)
 end
 
 --- Setup the plugin with user options
@@ -193,9 +206,15 @@ function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
   M.current_agent_type = M.config.default_agent
 
+  -- Single augroup for all plugin autocmds — cleared on each setup() call so
+  -- reloading the module (`:lua package.loaded['aiagent'] = nil`) never
+  -- accumulates duplicate handlers.
+  local augroup = vim.api.nvim_create_augroup("AIAgent", { clear = true })
+
   -- Re-derive tab highlight groups when the colorscheme changes.
   -- (Initial setup happens lazily inside update_winbar(), after bufferline has loaded.)
   vim.api.nvim_create_autocmd("ColorScheme", {
+    group = augroup,
     callback = function()
       setup_tab_highlights()
       update_winbar()
@@ -206,14 +225,20 @@ function M.setup(opts)
   -- Track whether the user just ran an explicit :e/:edit command.
   -- CmdlineLeave fires before the command executes, so we set the flag here
   -- and consume it in the BufEnter that follows.
+  -- IMPORTANT: also reset on non-matching commands (including <Esc>) so a
+  -- cancelled `:e` doesn't leave the flag set and spuriously redirect the
+  -- next unrelated BufEnter.
   local e_cmd_pending = false
   vim.api.nvim_create_autocmd("CmdlineLeave", {
+    group = augroup,
     pattern = ":",
     callback = function()
       local cmd = vim.fn.getcmdline()
       -- Match :e or :edit with a filename argument (optional !)
       if cmd:match("^%s*e!?%s") or cmd:match("^%s*edit!?%s") then
         e_cmd_pending = true
+      else
+        e_cmd_pending = false
       end
     end,
     desc = "Detect explicit :e/:edit commands for worktree redirect",
@@ -224,6 +249,7 @@ function M.setup(opts)
   -- when the user explicitly ran :e (flag above), so that normal buffer
   -- navigation (switching windows, <C-\><C-n>, bufferline, etc.) is unaffected.
   vim.api.nvim_create_autocmd("BufEnter", {
+    group = augroup,
     callback = function(args)
       if not e_cmd_pending then return end
       e_cmd_pending = false
@@ -237,8 +263,8 @@ function M.setup(opts)
       local agent = M.agents[M.current_agent]
       if not agent or not agent.worktree or not agent.git_root then return end
 
-      if filepath:sub(1, #agent.worktree) == agent.worktree then return end  -- already in worktree
-      if filepath:sub(1, #agent.git_root)  ~= agent.git_root  then return end  -- different repo
+      if is_under(filepath, agent.worktree) then return end  -- already in worktree
+      if not is_under(filepath, agent.git_root) then return end  -- different repo
 
       local rel_path = filepath:sub(#agent.git_root + 2)
       local wt_path  = agent.worktree .. "/" .. rel_path
@@ -265,6 +291,7 @@ function M.setup(opts)
   -- the worktree file directly — no double-load, no visible flash.
   -- Use :noautocmd e <file> to bypass this redirect when needed.
   vim.api.nvim_create_autocmd("BufNew", {
+    group = augroup,
     callback = function(args)
       local filepath = args.file
       if filepath == "" then return end
@@ -273,10 +300,10 @@ function M.setup(opts)
       if not agent or not agent.worktree or not agent.git_root then return end
 
       -- Already inside the worktree — don't redirect
-      if filepath:sub(1, #agent.worktree) == agent.worktree then return end
+      if is_under(filepath, agent.worktree) then return end
 
       -- Only redirect files that live under the same git root
-      if filepath:sub(1, #agent.git_root) ~= agent.git_root then return end
+      if not is_under(filepath, agent.git_root) then return end
 
       -- Compute the equivalent worktree path and redirect unconditionally.
       -- If the file doesn't exist in the worktree yet, the buffer opens as a
@@ -295,6 +322,7 @@ function M.setup(opts)
 
   -- Handle quit commands - clean up before Neovim checks for running jobs
   vim.api.nvim_create_autocmd("QuitPre", {
+    group = augroup,
     callback = function()
       if next(M.agents) ~= nil then
         force_cleanup()
@@ -305,6 +333,7 @@ function M.setup(opts)
 
   -- Also handle VimLeavePre as a fallback
   vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = augroup,
     callback = function()
       force_cleanup()
     end,
@@ -586,15 +615,25 @@ local function create_agent(name, cwd)
 
   -- Start the terminal with the AI agent
   local job_id = vim.fn.termopen(cmd, term_opts)
+  if not job_id or job_id <= 0 then
+    vim.notify(
+      "Failed to start agent '" .. name .. "' (command: " .. cmd .. ")",
+      vim.log.levels.ERROR
+    )
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    M.agents[name] = nil
+    return nil
+  end
 
-  -- Send /color command after the agent has had time to start
+  M.agents[name].job_id = job_id
+
+  -- Send /color command after the agent has had time to start.
+  -- Delay is configurable via M.config.agent_startup_delay (default 1500ms).
   vim.defer_fn(function()
     if M.agents[name] and M.agents[name].job_id then
       vim.fn.chansend(M.agents[name].job_id, "/color " .. color .. "\r")
     end
-  end, 1500)
-
-  M.agents[name].job_id = job_id
+  end, M.config.agent_startup_delay)
 
   -- Set buffer name for identification
   vim.api.nvim_buf_set_name(buf, "agent:" .. name)
@@ -820,7 +859,7 @@ function M.open(name, wtname, directory)
     create_window_layout()
   end
 
-  create_agent(agent_name, cwd)
+  if not create_agent(agent_name, cwd) then return end
   M.current_agent = agent_name
 
   if worktree_path and M.agents[agent_name] then
@@ -954,12 +993,19 @@ function M.send_context(agent_name)
   local refs = {}
   for _, file in ipairs(new_files) do
     table.insert(refs, "@" .. file)
-    agent.sent_files[file] = true
   end
 
-  -- Send file references to the terminal
+  -- Send file references to the terminal; only mark as sent on success so that
+  -- a closed channel doesn't silently drop files from future sends.
   local text = table.concat(refs, " ") .. " "
-  send_to_terminal(name, text)
+  local ok = pcall(send_to_terminal, name, text)
+  if not ok then
+    return 0
+  end
+
+  for _, file in ipairs(new_files) do
+    agent.sent_files[file] = true
+  end
 
   return #new_files
 end
@@ -989,43 +1035,11 @@ function M.reset_context(agent_name)
   end
 end
 
---- Send visual selection to the agent terminal
---- Opens the agent if not already open
----@param agent_name string|nil Agent name (defaults to current or "AIAgent")
-function M.send_selection(agent_name)
-  -- Get selection before we switch windows (marks may change)
-  local lines, filetype = get_visual_selection()
-  if #lines == 0 or (#lines == 1 and lines[1] == "") then
-    vim.notify("No text selected", vim.log.levels.WARN)
-    return
-  end
-
-  -- Determine which agent to use
-  local name = agent_name or M.current_agent or "AIAgent"
-
-  -- Open agent if not running
-  if not M.agents[name] then
-    M.open(name)
-    -- Give terminal time to initialize
-    vim.defer_fn(function()
-      M.send_selection_to_agent(name, lines, filetype)
-    end, 100)
-    return
-  end
-
-  -- If window isn't open, open it
-  if not M.is_open() then
-    M.open(name)
-  end
-
-  M.send_selection_to_agent(name, lines, filetype)
-end
-
 --- Internal: send selection lines to a running agent
 ---@param name string Agent name
 ---@param lines string[] Selected lines
 ---@param filetype string Filetype of the source buffer
-function M.send_selection_to_agent(name, lines, filetype)
+local function send_selection_to_agent(name, lines, filetype)
   local agent = M.agents[name]
   if not agent or not agent.job_id then
     vim.notify("Agent '" .. name .. "' not running", vim.log.levels.ERROR)
@@ -1046,5 +1060,40 @@ function M.send_selection_to_agent(name, lines, filetype)
   update_header()
   vim.cmd("startinsert")
 end
+
+--- Send visual selection to the agent terminal
+--- Opens the agent if not already open
+---@param agent_name string|nil Agent name (defaults to current or "AIAgent")
+function M.send_selection(agent_name)
+  -- Get selection before we switch windows (marks may change)
+  local lines, filetype = get_visual_selection()
+  if #lines == 0 or (#lines == 1 and lines[1] == "") then
+    vim.notify("No text selected", vim.log.levels.WARN)
+    return
+  end
+
+  -- Determine which agent to use
+  local name = agent_name or M.current_agent or "AIAgent"
+
+  -- Open agent if not running
+  if not M.agents[name] then
+    M.open(name)
+    -- Give terminal time to initialize
+    vim.defer_fn(function()
+      send_selection_to_agent(name, lines, filetype)
+    end, 100)
+    return
+  end
+
+  -- If window isn't open, open it
+  if not M.is_open() then
+    M.open(name)
+  end
+
+  send_selection_to_agent(name, lines, filetype)
+end
+
+-- Expose internals needed for testing (prefixed with _ by convention)
+M._is_under = is_under
 
 return M

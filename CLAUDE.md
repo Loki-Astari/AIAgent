@@ -8,11 +8,36 @@ This is **AIAgent.nvim**, a Neovim plugin that integrates AI agent CLIs into the
 
 ## Development
 
-This is a Neovim plugin with no build step. To test changes:
+This is a Neovim plugin with no build step. To apply changes in a running session:
 1. Ensure the plugin directory is in your Neovim runtimepath
-2. Restart Neovim or run `:lua package.loaded['aiagent'] = nil` to reload
+2. Restart Neovim or run `:lua package.loaded['aiagent'] = nil` followed by `require('aiagent').setup(...)` to reload
 
-No test framework is currently configured.
+All autocmds are registered under the `AIAgent` augroup, so reloading via `setup()` clears and re-registers them cleanly.
+
+## Testing
+
+Tests use [plenary.nvim](https://github.com/nvim-lua/plenary.nvim)'s busted-compatible runner.
+
+**Run all tests (headless):**
+```bash
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua'}"
+```
+
+**Override the plenary path** (if not at the default lazy.nvim location):
+```bash
+PLENARY_DIR=~/.local/share/nvim/lazy/plenary.nvim nvim --headless \
+  -u tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua'}"
+```
+
+**Run a single spec file:**
+```bash
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedFile tests/aiagent_spec.lua"
+```
+
+Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `tests/minimal_init.lua` bootstraps plenary and the plugin runtimepath.
 
 ## Architecture
 
@@ -70,7 +95,7 @@ Path comparison resolves symlinks on both sides to handle the macOS `/var` → `
 Two autocmds cooperate to redirect file opens to the active agent's worktree:
 
 - **`BufNew`** — fires when a new buffer is created. If the path is inside the git repo but not already in the worktree, the buffer is renamed to the worktree path and tagged with `vim.b[buf].aiagent_name`.
-- **`CmdlineLeave` + `BufEnter`** — handles `:e X` when `X` is already open in a non-worktree buffer. `CmdlineLeave` sets a flag when an `:e`/`:edit` command is detected; `BufEnter` only redirects when that flag is set (clears immediately after). This prevents redirect on passive buffer switches (e.g. `<C-\><C-n>`, bufferline clicks).
+- **`CmdlineLeave` + `BufEnter`** — handles `:e X` when `X` is already open in a non-worktree buffer. `CmdlineLeave` sets a flag when an `:e`/`:edit` command is detected and **clears it** for any other command (including `<Esc>`), so a cancelled `:e` never leaves a stale flag. `BufEnter` only redirects when that flag is set (clears immediately after). This prevents redirect on passive buffer switches (e.g. `<C-\><C-n>`, bufferline clicks).
 
 ### Bufferline integration
 
