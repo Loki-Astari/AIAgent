@@ -474,7 +474,7 @@ local function update_header()
   local lines = {
     "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-v> paste reg",
     "<C-\\><C-c> send context | <C-\\><C-a> cycle agents",
-    "<C-\\><C-r> search output, <C-\\><C-v> paste system buffer."
+    "<C-\\><C-r> search input",
   }
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
