@@ -105,7 +105,7 @@ Examples:
 :AgentOpen                    " opens a Cursor agent named 'AIAgent'
 :AgentSet claude              " switch back to Claude
 :AgentOpen Review             " opens a Claude agent named 'Review'
-:AgentOpen Feature -worktree  " opens a Claude agent in a fresh worktree
+:AgentOpen Feature -worktree  " opens a Claude agent in a worktree (persistent across sessions)
 :AgentOpen Hotfix ~/trees/fix " opens a Claude agent in an existing directory
 ```
 
@@ -171,7 +171,7 @@ If no agent is running, one will be started automatically.
 
 When starting a new agent on a separate task it can be useful to isolate it in its own git worktree, so its changes don't interfere with your current working tree.
 
-### Auto-create a worktree
+### Creating a worktree agent
 
 Pass `-worktree` as the second argument to `:AgentOpen`:
 
@@ -180,14 +180,48 @@ Pass `-worktree` as the second argument to `:AgentOpen`:
 ```
 
 This will:
-1. Create a new branch (`agent/feature-<timestamp>`) from the current `HEAD`
-2. Check it out into a temporary directory
+1. Create a branch `agent/feature` from the current `HEAD` (or reuse it if it already exists)
+2. Check it out into a consistent path under the system temp directory (e.g. `/tmp/nvim-agent-feature`)
 3. Start the agent with that directory as its working directory
-4. Remove the worktree automatically when the agent is closed
+
+### Persistent worktrees
+
+Worktrees are **persistent** — they are not removed when you close the agent or exit Neovim. The branch and directory use a fixed, deterministic naming convention based on the agent name, so the plugin can find them again across sessions.
+
+When you reopen an agent by name, the plugin automatically detects any existing worktree and reconnects:
+
+```
+" Session 1: create the worktree
+:AgentOpen Feature -worktree
+
+" Session 2: -worktree is not required — auto-detected from git
+:AgentOpen Feature
+```
+
+To permanently remove a worktree when you are done with it:
+
+```bash
+git worktree remove /tmp/nvim-agent-feature
+git branch -d agent/feature
+```
+
+### Opening files in the worktree
+
+While a worktree agent is active (i.e. it is the current agent), opening a file with `:e` will automatically redirect to the worktree version of that file. For example, if the worktree is at `/tmp/nvim-agent-feature` and you run:
+
+```
+:e src/main.cpp
+```
+
+The plugin opens `/tmp/nvim-agent-feature/src/main.cpp` instead of the working-tree copy. The bufferline tab will be prefixed with the agent name (e.g. `Feature: main.cpp`) to make it clear which version you are editing.
+
+If the worktree version of the file is already open in another buffer, that buffer is reused rather than opening a duplicate.
+
+Switching to an existing buffer directly (e.g. via bufferline or `<C-^>`) does **not** trigger a redirect — only an explicit `:e` command does.
 
 ### Use an existing directory
 
-Pass any directory path as the second argument and the agent will start there:
+Pass any directory path as the second argument to start the agent there without creating a managed worktree:
 
 ```
 :AgentOpen Hotfix /path/to/existing/worktree
