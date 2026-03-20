@@ -703,26 +703,35 @@ local function find_existing_worktree(slug)
   return nil
 end
 
---- Create (or reconnect to) a git worktree for an agent; returns path and git root, or nil, nil on failure
----@param agent_name string
+--- Create (or reconnect to) a git worktree; returns path and git root, or nil, nil on failure.
+--- Derives the branch name and default directory from wt_name.
+--- If directory is provided and the worktree already exists, that is an error.
+---@param wt_name string Worktree display name (branch/dir derived from this)
+---@param directory string|nil Explicit directory for a new worktree (nil = auto-generate)
 ---@return string|nil, string|nil
-local function create_worktree(agent_name)
+local function create_worktree(wt_name, directory)
   local git_root = vim.fn.system("git rev-parse --show-toplevel 2>/dev/null"):gsub("\n", "")
   if vim.v.shell_error ~= 0 or git_root == "" then
     vim.notify("Not in a git repository", vim.log.levels.ERROR)
     return nil, nil
   end
 
-  local slug = agent_name:lower():gsub("[^%w]", "-")
-  local worktree_path = worktree_path_for(slug)
+  local slug = wt_name:lower():gsub("[^%w]", "-")
   local branch_name = "agent/" .. slug
 
   -- Reconnect if the worktree already exists
   local existing = find_existing_worktree(slug)
   if existing then
+    if directory and directory ~= "" then
+      vim.notify("Worktree '" .. wt_name .. "' already exists at '" .. existing .. "'; cannot specify a directory", vim.log.levels.ERROR)
+      return nil, nil
+    end
     vim.notify("Reconnected to existing worktree: " .. existing, vim.log.levels.INFO)
     return existing, git_root
   end
+
+  -- Worktree doesn't exist — use the provided directory or auto-generate one
+  local worktree_path = (directory and directory ~= "") and directory or worktree_path_for(slug)
 
   -- Branch may already exist (worktree was removed but branch kept); try without -b first
   vim.fn.system("git show-ref --verify --quiet refs/heads/" .. vim.fn.shellescape(branch_name) .. " 2>&1")
@@ -762,13 +771,16 @@ local function find_agent_worktree(agent_name)
   return nil, nil
 end
 
---- Open an AI agent in a right-side split
---- The optional second argument controls the working directory:
----   "-worktree"  auto-create a git worktree named after the agent
----   <directory>  use that directory as the working directory
----@param name string|nil Agent name (defaults to "AIAgent")
----@param arg2 string|nil "-worktree" or a directory path
-function M.open(name, arg2)
+--- Open an AI agent in a right-side split.
+--- Syntax: :AgentOpen [Name [WTName [directory]]]
+---   Name      - agent name (default: "AIAgent")
+---   WTName    - worktree name; "-" is shorthand for using the agent name
+---   directory - explicit directory for a new worktree (error if worktree already exists)
+--- When WTName is omitted, auto-reconnects to an existing worktree named after the agent.
+---@param name string|nil Agent name
+---@param wtname string|nil Worktree name ("-" = use agent name)
+---@param directory string|nil Explicit worktree directory (new worktrees only)
+function M.open(name, wtname, directory)
   local agent_name = name or "AIAgent"
 
   -- If agent already exists, switch to it
@@ -780,24 +792,22 @@ function M.open(name, arg2)
     return
   end
 
-  -- Resolve the working directory from the second argument
+  -- "-" is shorthand for using the agent name as the worktree name
+  if wtname == "-" then
+    wtname = agent_name
+  end
+
   local cwd = nil
   local worktree_path = nil
   local worktree_git_root = nil
-  if arg2 == "-worktree" then
-    worktree_path, worktree_git_root = create_worktree(agent_name)
+
+  if wtname and wtname ~= "" then
+    -- WTName provided: create or reconnect to the named worktree
+    worktree_path, worktree_git_root = create_worktree(wtname, directory)
     if not worktree_path then return end
     cwd = worktree_path
-  elseif arg2 and arg2 ~= "" then
-    local stat = vim.loop.fs_stat(arg2)
-    if stat and stat.type == "directory" then
-      cwd = arg2
-    else
-      vim.notify("Not a directory: " .. arg2, vim.log.levels.ERROR)
-      return
-    end
   else
-    -- No explicit flag — auto-reconnect to a persistent worktree if one exists
+    -- No WTName: auto-reconnect to an existing worktree named after the agent
     worktree_path, worktree_git_root = find_agent_worktree(agent_name)
     if worktree_path then
       cwd = worktree_path
@@ -813,11 +823,9 @@ function M.open(name, arg2)
   create_agent(agent_name, cwd)
   M.current_agent = agent_name
 
-  -- Record the auto-created worktree so cleanup_agent can remove it,
-  -- and the git_root so we can resolve relative paths without a subprocess.
   if worktree_path and M.agents[agent_name] then
-    M.agents[agent_name].worktree  = worktree_path
-    M.agents[agent_name].git_root  = worktree_git_root
+    M.agents[agent_name].worktree = worktree_path
+    M.agents[agent_name].git_root = worktree_git_root
   end
 
   update_header()

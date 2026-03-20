@@ -74,7 +74,7 @@ require("aiagent").setup({
 | Command | Description |
 |---------|-------------|
 | `:AgentSet {agent}` | Set which agent CLI to use for new agents (e.g. `claude`, `cursor`) |
-| `:AgentOpen [name] [-worktree\|dir]` | Open an agent terminal (name defaults to `AIAgent`) |
+| `:AgentOpen [Name [WTName [directory]]]` | Open an agent terminal (see below for full syntax) |
 | `:AgentClose [name]` | Close an agent (defaults to current) |
 | `:AgentToggle [name]` | Toggle an agent terminal |
 | `:AgentSwitch {name}` | Switch to an existing agent by name |
@@ -101,12 +101,13 @@ require("aiagent").setup({
 Examples:
 
 ```
-:AgentSet cursor              " switch to Cursor for new agents
-:AgentOpen                    " opens a Cursor agent named 'AIAgent'
-:AgentSet claude              " switch back to Claude
-:AgentOpen Review             " opens a Claude agent named 'Review'
-:AgentOpen Feature -worktree  " opens a Claude agent in a worktree (persistent across sessions)
-:AgentOpen Hotfix ~/trees/fix " opens a Claude agent in an existing directory
+:AgentSet cursor                          " switch to Cursor for new agents
+:AgentOpen                                " opens a Cursor agent named 'AIAgent'
+:AgentSet claude                          " switch back to Claude
+:AgentOpen Review                         " opens a Claude agent named 'Review'
+:AgentOpen Feature -                      " opens a Claude agent in a worktree named 'feature'
+:AgentOpen Feature MyWT                   " opens a Claude agent named 'Feature' in a worktree named 'MyWT'
+:AgentOpen Feature MyWT ~/trees/myWT      " same, but creates the worktree at a specific directory
 ```
 
 ### Keybindings
@@ -171,30 +172,44 @@ If no agent is running, one will be started automatically.
 
 When starting a new agent on a separate task it can be useful to isolate it in its own git worktree, so its changes don't interfere with your current working tree.
 
-### Creating a worktree agent
-
-Pass `-worktree` as the second argument to `:AgentOpen`:
+### AgentOpen syntax
 
 ```
-:AgentOpen Feature -worktree
+:AgentOpen [Name [WTName [directory]]]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `Name` | Agent name shown in the tab (default: `AIAgent`) |
+| `WTName` | Worktree name. `-` is shorthand for using the agent `Name`. Determines the branch (`agent/<slug>`) and default directory. |
+| `directory` | Explicit path for a **new** worktree. Error if the worktree already exists. |
+
+### Creating a worktree agent
+
+Pass a `WTName` as the second argument. Use `-` as shorthand when you want the worktree named after the agent:
+
+```
+:AgentOpen Feature -          " worktree name = 'Feature' (branch: agent/feature)
+:AgentOpen Feature MyWT       " agent named 'Feature', worktree named 'MyWT' (branch: agent/mywt)
+:AgentOpen Feature - ~/trees  " worktree named 'Feature' created at ~/trees
 ```
 
 This will:
-1. Create a branch `agent/feature` from the current `HEAD` (or reuse it if it already exists)
-2. Check it out into a consistent path under the system temp directory (e.g. `/tmp/nvim-agent-feature`)
+1. Create a branch `agent/<slug>` from the current `HEAD` (or reuse it if it already exists)
+2. Check it out into a consistent path under the system temp directory (e.g. `/tmp/nvim-agent-feature`), or the explicit `directory` if given
 3. Start the agent with that directory as its working directory
 
 ### Persistent worktrees
 
-Worktrees are **persistent** — they are not removed when you close the agent or exit Neovim. The branch and directory use a fixed, deterministic naming convention based on the agent name, so the plugin can find them again across sessions.
+Worktrees are **persistent** — they are not removed when you close the agent or exit Neovim. The branch and directory use a fixed, deterministic naming convention based on the `WTName`, so the plugin can find them again across sessions.
 
-When you reopen an agent by name, the plugin automatically detects any existing worktree and reconnects:
+When you reopen an agent by the same `Name`, the plugin automatically detects any existing worktree (matched by the slug derived from `Name`) and reconnects — no need to pass `WTName` again:
 
 ```
 " Session 1: create the worktree
-:AgentOpen Feature -worktree
+:AgentOpen Feature -
 
-" Session 2: -worktree is not required — auto-detected from git
+" Session 2: auto-detected from git, no WTName needed
 :AgentOpen Feature
 ```
 
@@ -218,14 +233,6 @@ The plugin opens `/tmp/nvim-agent-feature/src/main.cpp` instead of the working-t
 If the worktree version of the file is already open in another buffer, that buffer is reused rather than opening a duplicate.
 
 Switching to an existing buffer directly (e.g. via bufferline or `<C-^>`) does **not** trigger a redirect — only an explicit `:e` command does.
-
-### Use an existing directory
-
-Pass any directory path as the second argument to start the agent there without creating a managed worktree:
-
-```
-:AgentOpen Hotfix /path/to/existing/worktree
-```
 
 ## License
 

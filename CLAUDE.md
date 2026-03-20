@@ -40,14 +40,28 @@ Worktrees are **persistent** — they are not removed when an agent is closed or
 | Branch | `agent/{slug}` |
 | Directory | `$TMPDIR/nvim-agent-{slug}` (symlinks resolved via `vim.fn.resolve`) |
 
-Where `{slug}` is the agent name lowercased with non-alphanumeric characters replaced by `-`.
+Where `{slug}` is the `WTName` lowercased with non-alphanumeric characters replaced by `-`. When no `WTName` is given, the agent `Name` is used as the slug source.
+
+### Command syntax
+
+`:AgentOpen [Name [WTName [directory]]]`
+
+- `Name` — agent name (default: `AIAgent`)
+- `WTName` — worktree name; `-` is shorthand for using the agent name. The slug (lowercase, non-alphanumeric → `-`) is derived from this and used for the branch and default directory.
+- `directory` — explicit directory for a **new** worktree; error if the worktree already exists
 
 ### Auto-reconnect logic
 
-On `:AgentOpen {name}` (with or without `-worktree`), the plugin:
-1. Calls `git worktree list --porcelain` and scans for the expected path
-2. If found, reconnects silently; if not found and `-worktree` was passed, creates a new one
-3. Handles the edge case where the branch exists but the worktree directory was manually removed (uses `git worktree add <path> <branch>` without `-b`)
+On `:AgentOpen Name` (no `WTName`), the plugin:
+1. Derives a slug from `Name` and calls `git worktree list --porcelain` to scan for the expected path
+2. If found, reconnects silently and sets the agent's `cwd` to the worktree
+3. If not found, opens with the current directory (no worktree)
+
+On `:AgentOpen Name WTName [directory]`:
+1. Derives a slug from `WTName` and scans for an existing worktree
+2. If found and no `directory` given, reconnects; if found and `directory` given, errors
+3. If not found, creates a new worktree at `directory` (or the auto-generated path)
+4. Handles the edge case where the branch exists but the worktree directory was manually removed (uses `git worktree add <path> <branch>` without `-b`)
 
 Path comparison resolves symlinks on both sides to handle the macOS `/var` → `/private/var` symlink.
 
