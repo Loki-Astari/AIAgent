@@ -9,6 +9,8 @@ M.config = {
   agent_startup_delay = 1500, -- Milliseconds to wait before sending /color command on startup
   show_header = true,         -- Show the keybind instruction header above the terminal
   scroll_start_line = 9,      -- Line to jump to when first entering scroll mode
+  idle_timeout_ms = 8000,     -- ms of silence after activity before flagging (0 = disabled)
+  idle_notify     = false,    -- also fire vim.notify when flagging attention
   colors = { "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" },
   -- Map of symbolic names to CLI executables. Extend this in setup() for custom agents.
   known_agents = {
@@ -25,7 +27,7 @@ M.config = {
 }
 
 -- Track agents and windows
-M.agents = {}           -- { name = { buf, job_id, scroll_mode, scroll_pos, agent_type, command, sent_files, color, worktree, git_root, slug } }
+M.agents = {}           -- { name = { buf, job_id, scroll_mode, scroll_pos, agent_type, command, sent_files, color, worktree, git_root, slug, attention_needed, last_output_time, line_count_at_visit } }
 M.current_agent = nil   -- name of active agent
 M.current_agent_type = "claude"  -- symbolic agent name used for new agents
 M.win = nil             -- shared terminal window
@@ -33,6 +35,7 @@ M.header_buf = nil      -- shared header buffer
 M.header_win = nil      -- shared header window
 M.prev_win = nil        -- Window to return to when exiting terminal mode
 M.color_index = 0       -- Counter for cycling through colors
+M.idle_timer = nil      -- repeating timer for idle attention detection
 
 --- Get file paths of all open buffers (excluding special buffers)
 ---@return string[] List of absolute file paths
@@ -156,6 +159,13 @@ end
 
 --- Force cleanup of all agents and windows
 local function force_cleanup()
+  -- Stop the idle attention timer
+  if M.idle_timer then
+    M.idle_timer:stop()
+    M.idle_timer:close()
+    M.idle_timer = nil
+  end
+
   -- Clean up all agents
   for name, _ in pairs(M.agents) do
     cleanup_agent(name)
@@ -238,6 +248,12 @@ function M.set_color(color)
   update_header()
   vim.notify("Agent color set to: " .. color, vim.log.levels.INFO)
 end
+
+-- Forward declarations for functions defined later in the file.
+-- M.setup() references these in closures (ColorScheme autocmd, idle timer);
+-- declaring them here lets Lua capture them as upvalues rather than globals.
+local setup_tab_highlights
+local update_winbar
 
 --- Setup the plugin with user options
 ---@param opts table|nil Configuration options
@@ -378,6 +394,54 @@ function M.setup(opts)
     end,
     desc = "Close agent terminals before exiting Neovim",
   })
+
+  -- Idle attention detection timer: checks background agents for silence after activity.
+  -- Restart on each setup() call to pick up new idle_timeout_ms config.
+  if M.idle_timer then
+    M.idle_timer:stop()
+    M.idle_timer:close()
+    M.idle_timer = nil
+  end
+  if M.config.idle_timeout_ms > 0 then
+    M.idle_timer = vim.uv.new_timer()
+    M.idle_timer:start(3000, 3000, vim.schedule_wrap(function()
+      local now = vim.uv.now()
+      local updated = false
+      for agent_name, agent in pairs(M.agents) do
+        if agent.attention_needed then goto continue end
+        if not agent.buf or not vim.api.nvim_buf_is_valid(agent.buf) then goto continue end
+        if not agent.last_output_time then goto continue end
+
+        -- Suppress flagging only when the terminal window is the actively focused
+        -- window *and* it is showing this agent.  M.current_agent alone is not
+        -- sufficient because the user may have returned to their code editor while
+        -- the terminal still "selects" this agent.
+        local user_watching = M.win
+          and vim.api.nvim_win_is_valid(M.win)
+          and vim.api.nvim_get_current_win() == M.win
+          and agent_name == M.current_agent
+        if user_watching then goto continue end
+
+        -- Only flag when new lines have appeared since the user last visited.
+        -- This is the primary guard against false re-alerts: cursor redraws and
+        -- prompt updates don't add lines, so line_count stays at the visit baseline.
+        local current_lines = vim.api.nvim_buf_line_count(agent.buf)
+        local baseline = agent.line_count_at_visit or current_lines
+        if current_lines <= baseline then goto continue end
+
+        local elapsed = now - agent.last_output_time
+        if elapsed >= M.config.idle_timeout_ms then
+          agent.attention_needed = true
+          updated = true
+          if M.config.idle_notify then
+            vim.notify("Agent '" .. agent_name .. "' is waiting for input", vim.log.levels.INFO)
+          end
+        end
+        ::continue::
+      end
+      if updated then update_winbar() end
+    end))
+  end
 end
 
 --- Calculate the window width based on config
@@ -433,24 +497,26 @@ local TAB_COLORS = {
 --- Define highlight groups for the agent tab winbar.
 --- Called lazily (inside update_winbar) so bufferline is guaranteed to be loaded.
 --- Matches bufferline's own approach: separator fg = fill color, bg = tab's own bg.
-local function setup_tab_highlights()
+setup_tab_highlights = function()
   vim.api.nvim_set_hl(0, "AIAgentTabFill", { link = "BufferLineFill" })
   local fill_bg = get_hl("BufferLineFill", "bg")
 
   -- Per-color groups: active = bold white, inactive = dimmed text, same bg
   for color, bg in pairs(TAB_COLORS) do
-    vim.api.nvim_set_hl(0, "AIAgentTabActive_"   .. color, { fg = "#ffffff", bg = bg, bold = true })
-    vim.api.nvim_set_hl(0, "AIAgentTabInactive_" .. color, { fg = "#888888", bg = bg })
-    vim.api.nvim_set_hl(0, "AIAgentSep_"         .. color, { fg = fill_bg,  bg = bg })
+    vim.api.nvim_set_hl(0, "AIAgentTabActive_"    .. color, { fg = "#ffffff", bg = bg, bold = true })
+    vim.api.nvim_set_hl(0, "AIAgentTabInactive_"  .. color, { fg = "#888888", bg = bg })
+    vim.api.nvim_set_hl(0, "AIAgentTabAttention_" .. color, { fg = "#ffffff", bg = bg })
+    vim.api.nvim_set_hl(0, "AIAgentSep_"          .. color, { fg = fill_bg,  bg = bg })
   end
 
   -- Fallback groups for any color not in TAB_COLORS
   local active_bg   = get_hl("BufferLineBufferSelected", "bg")
   local inactive_bg = get_hl("BufferLineBackground",     "bg")
-  vim.api.nvim_set_hl(0, "AIAgentTabActive",   { link = "BufferLineBufferSelected" })
-  vim.api.nvim_set_hl(0, "AIAgentTabInactive", { link = "BufferLineBackground" })
-  vim.api.nvim_set_hl(0, "AIAgentSepActive",   { fg = fill_bg, bg = active_bg })
-  vim.api.nvim_set_hl(0, "AIAgentSepInactive", { fg = fill_bg, bg = inactive_bg })
+  vim.api.nvim_set_hl(0, "AIAgentTabActive",    { link = "BufferLineBufferSelected" })
+  vim.api.nvim_set_hl(0, "AIAgentTabInactive",  { link = "BufferLineBackground" })
+  vim.api.nvim_set_hl(0, "AIAgentTabAttention", { fg = "#ffffff", bg = inactive_bg })
+  vim.api.nvim_set_hl(0, "AIAgentSepActive",    { fg = fill_bg, bg = active_bg })
+  vim.api.nvim_set_hl(0, "AIAgentSepInactive",  { fg = fill_bg, bg = inactive_bg })
 end
 
 -- Slant separator characters — exact codepoints bufferline uses for "slant" style
@@ -471,19 +537,36 @@ local function build_winbar()
     local agent     = M.agents[name]
     local color     = agent and agent.color
     local is_active = (name == M.current_agent)
+    local attention = agent and agent.attention_needed
 
     local tab_hl, sep_hl
     if color and TAB_COLORS[color] then
-      local kind = is_active and "AIAgentTabActive_" or "AIAgentTabInactive_"
+      local kind
+      if is_active then
+        kind = "AIAgentTabActive_"
+      elseif attention then
+        kind = "AIAgentTabAttention_"
+      else
+        kind = "AIAgentTabInactive_"
+      end
       tab_hl = "%#" .. kind .. color .. "#"
       sep_hl = "%#AIAgentSep_" .. color .. "#"
     else
-      tab_hl = is_active and "%#AIAgentTabActive#" or "%#AIAgentTabInactive#"
-      sep_hl = is_active and "%#AIAgentSepActive#" or "%#AIAgentSepInactive#"
+      if is_active then
+        tab_hl = "%#AIAgentTabActive#"
+        sep_hl = "%#AIAgentSepActive#"
+      elseif attention then
+        tab_hl = "%#AIAgentTabAttention#"
+        sep_hl = "%#AIAgentSepInactive#"
+      else
+        tab_hl = "%#AIAgentTabInactive#"
+        sep_hl = "%#AIAgentSepInactive#"
+      end
     end
 
+    local label = attention and (name .. " ●") or name
     table.insert(parts, sep_hl .. SEP_L)
-    table.insert(parts, tab_hl .. " " .. name .. " ")
+    table.insert(parts, tab_hl .. " " .. label .. " ")
     table.insert(parts, sep_hl .. SEP_R)
   end
 
@@ -493,7 +576,7 @@ end
 
 --- Update the winbar on the terminal window with current agent tabs.
 --- setup_tab_highlights() is called here (not at startup) so bufferline is guaranteed loaded.
-local function update_winbar()
+update_winbar = function()
   if not M.win or not vim.api.nvim_win_is_valid(M.win) then return end
   setup_tab_highlights()
   vim.api.nvim_set_option_value("winbar", build_winbar(), { win = M.win })
@@ -649,6 +732,9 @@ local function create_agent(name, cwd)
     color = color,
     worktree = nil,
     git_root = nil,
+    attention_needed = false,
+    last_output_time = nil,
+    line_count_at_visit = nil,
   }
 
   -- Show buffer in window and switch to it before starting terminal
@@ -683,6 +769,25 @@ local function create_agent(name, cwd)
 
   M.agents[name].job_id = job_id
 
+  -- Track output to detect when a background agent finishes and needs attention.
+  -- on_lines fires whenever the terminal buffer content changes (i.e. new output).
+  vim.api.nvim_buf_attach(buf, false, {
+    -- Update last_output_time whenever the terminal buffer gains new lines.
+    -- new_lastline > lastline means lines were added (real output); cursor movement
+    -- and in-place redraws have new_lastline == lastline and are ignored so they
+    -- don't push last_output_time forward and delay the idle threshold.
+    on_lines = function(_, _, _, _, lastline, new_lastline)
+      local agent = M.agents[name]
+      if not agent then return true end  -- detach when agent is gone
+      if new_lastline <= lastline then return end  -- no new lines; skip cursor/redraw noise
+      agent.last_output_time = vim.uv.now()
+      if agent.attention_needed then
+        agent.attention_needed = false
+        vim.schedule(update_winbar)
+      end
+    end,
+  })
+
   -- Send /color command after the agent has had time to start.
   -- Delay is configurable via M.config.agent_startup_delay (default 1500ms).
   vim.defer_fn(function()
@@ -700,6 +805,13 @@ local function create_agent(name, cwd)
     buffer = buf,
     callback = function()
       local agent = M.agents[name]
+      if agent then
+        agent.attention_needed = false
+        -- Record the line count at the time of this visit.  The timer only flags
+        -- when the current line count exceeds this baseline, so idle cursor redraws
+        -- (which don't add lines) can never re-trigger attention after a visit.
+        agent.line_count_at_visit = vim.api.nvim_buf_line_count(agent.buf)
+      end
       if agent and not agent.scroll_mode then
         -- Auto-send context if enabled
         if M.config.auto_send_context then
