@@ -13,6 +13,7 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 - **Visual selection support** - Select code and send it directly to the agent to ask questions about specific snippets
 - **Scroll mode** - Browse agent output history without leaving the window; position is remembered between sessions
 - **Git worktree support** - Isolate each agent's work in its own branch and directory, with automatic reconnect across sessions
+- **Idle attention alerts** - When a background agent finishes or pauses for input, its tab is highlighted with a `●` indicator so you know to switch back
 
 ## Requirements
 
@@ -67,6 +68,8 @@ require("aiagent").setup({
   agent_startup_delay = 1500, -- ms to wait before sending /color on agent start
   show_header = true,         -- set to false to hide the keybind instruction header
   scroll_start_line = 9,      -- line to jump to when first entering scroll mode
+  idle_timeout_ms = 8000,     -- ms of silence after activity before flagging (0 = disabled)
+  idle_notify = false,        -- also fire vim.notify when flagging attention
   -- Extend or override the built-in agent → executable mapping
   known_agents = {
     mytool = "my-custom-cli",
@@ -141,6 +144,32 @@ Press `<C-\><C-s>` to enter scroll mode, which lets you browse output history us
 - **Re-entry**: restores the cursor position from your last scroll session
 
 Press `i` to return to terminal input, or `<C-\><C-n>` to jump back to your editing window.
+
+### Idle attention alerts
+
+When you start a long-running job in one agent and switch to another, the plugin watches for the first agent to finish or pause. When it detects that a background agent has produced new output and then gone silent, its tab is highlighted and a `●` symbol is appended:
+
+```
+[ Review ] [ Feature ● ]   ← Feature needs attention
+```
+
+The alert clears automatically when you switch back to that agent. If the agent resumes work (produces more output), the alert is also cleared immediately.
+
+**How detection works:**
+
+- The plugin records the buffer line count each time you visit an agent
+- While in the background, the agent's output is tracked — only genuine new lines count (cursor blinks and prompt redraws are ignored)
+- Once the output has been silent for `idle_timeout_ms` (default: 8 seconds), the tab is flagged
+- Agents that are idle because they haven't been asked anything are never flagged — only agents that were actively producing output and then stopped
+
+**Configuration:**
+
+```lua
+require("aiagent").setup({
+  idle_timeout_ms = 8000,  -- silence threshold in ms (0 = disable)
+  idle_notify     = false, -- also fire vim.notify when flagging
+})
+```
 
 ### Suggested Mappings
 

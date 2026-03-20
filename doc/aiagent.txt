@@ -15,8 +15,9 @@ CONTENTS                                                    *aiagent-contents*
   6. Keymaps ................... |aiagent-keymaps|
   7. Lua API ................... |aiagent-api|
   8. Git Worktrees ............. |aiagent-worktrees|
-  9. Bufferline Integration .... |aiagent-bufferline|
- 10. Health check .............. |aiagent-health|
+  9. Idle Attention Alerts ..... |aiagent-idle|
+ 10. Bufferline Integration .... |aiagent-bufferline|
+ 11. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -31,6 +32,7 @@ Neovim as a persistent terminal split. Features include:
   - Visual selection and open-buffer context sending
   - Scroll mode with position memory
   - Bufferline tab integration
+  - Idle attention alerts when a background agent finishes or needs input
 
 ==============================================================================
 2. REQUIREMENTS                                         *aiagent-requirements*
@@ -66,6 +68,8 @@ Full example: >lua
     agent_startup_delay = 1500,
     show_header         = true,
     scroll_start_line   = 9,
+    idle_timeout_ms     = 8000,
+    idle_notify         = false,
     colors = { "red", "blue", "orange", "green", "yellow",
                "magenta", "cyan", "purple" },
     known_agents = {
@@ -116,6 +120,20 @@ scroll_start_line ~
   Type: number  Default: `9`
   Buffer line to jump to when entering scroll mode for the first time
   in a session. Skips the agent's startup preamble.
+
+                                          *aiagent-config-idle_timeout_ms*
+idle_timeout_ms ~
+  Type: number  Default: `8000`
+  Milliseconds of silence after activity before a background agent is
+  flagged as needing attention. Set to `0` to disable idle alerts
+  entirely. See |aiagent-idle|.
+
+                                              *aiagent-config-idle_notify*
+idle_notify ~
+  Type: boolean  Default: `false`
+  When `true`, also fire |vim.notify| when a background agent is flagged.
+  The tab indicator is always shown regardless of this setting.
+  See |aiagent-idle|.
 
                                                  *aiagent-config-colors*
 colors ~
@@ -312,14 +330,14 @@ Opening with a worktree ~
 
 Auto-reconnect ~
   On `:AgentOpen Name` (no WTName), the plugin scans the git worktree
-  list for a worktree matching the auto-generated path. If found, the
-  agent reconnects to it silently.
+  list for a worktree whose branch matches `refs/heads/agent/{slug}`.
+  If found, the agent reconnects to it silently.
 
 File redirection ~
   While a worktree agent is active, opening files with `:e` inside the
   same repository automatically redirects to the worktree version.
-  Bufferline tabs for redirected files are prefixed with the agent name
-  (requires |aiagent-bufferline| configuration).
+  Bufferline tabs for redirected files are prefixed with the worktree
+  slug (requires |aiagent-bufferline| configuration).
 
   To bypass redirection: >
     :noautocmd e path/to/file
@@ -331,9 +349,47 @@ Removing a worktree ~
 <
 
 ==============================================================================
-9. BUFFERLINE INTEGRATION                               *aiagent-bufferline*
+9. IDLE ATTENTION ALERTS                                      *aiagent-idle*
 
-To prefix worktree-redirected buffer tabs with the agent name, pass the
+When you start a long-running job in one agent and switch to another, the
+plugin watches for the first agent to finish or pause for input. When a
+background agent has produced new output and then gone silent for
+|aiagent-config-idle_timeout_ms| milliseconds, its winbar tab is highlighted
+and a `●` symbol is appended to the name: >
+
+  [ Review ] [ Feature ● ]
+<
+The alert clears automatically when you switch back to that agent. If the
+agent resumes work (produces more output), the alert is also cleared
+immediately.
+
+Detection ~
+  The plugin records the terminal buffer's line count each time you visit
+  an agent. While the agent is in the background:
+
+  - New lines added to the buffer update an internal timestamp
+  - Cursor blinks, prompt redraws, and in-place updates (which do not
+    add lines) are ignored — they cannot re-trigger an alert after a visit
+  - Once the new-line timestamp is older than |aiagent-config-idle_timeout_ms|,
+    the tab is flagged
+
+  Agents that are idle because they have not been asked anything are never
+  flagged — only agents that were actively producing output and then stopped.
+
+Configuration ~
+  See |aiagent-config-idle_timeout_ms| and |aiagent-config-idle_notify|.
+
+  To disable idle alerts: >lua
+    require('aiagent').setup({ idle_timeout_ms = 0 })
+<
+  To also receive a |vim.notify| message when an agent is flagged: >lua
+    require('aiagent').setup({ idle_notify = true })
+<
+
+==============================================================================
+10. BUFFERLINE INTEGRATION                               *aiagent-bufferline*
+
+To prefix worktree-redirected buffer tabs with the worktree slug, pass the
 `bufferline_name_formatter` function to bufferline's `name_formatter` option:
 >lua
   require('bufferline').setup({
@@ -342,10 +398,11 @@ To prefix worktree-redirected buffer tabs with the agent name, pass the
     },
   })
 <
-Tabs for worktree files will display as `AgentName: filename`.
+Tabs for worktree files will display as `slug: filename` (e.g.
+`feature: main.cpp`). Non-worktree buffers are unaffected.
 
 ==============================================================================
-10. HEALTH CHECK                                           *aiagent-health*
+11. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 
