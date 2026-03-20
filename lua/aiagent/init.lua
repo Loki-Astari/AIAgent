@@ -142,11 +142,6 @@ local function cleanup_agent(name)
     pcall(vim.api.nvim_buf_delete, agent.buf, { force = true, unload = false })
   end
 
-  -- Remove git worktree if one was created for this agent
-  if agent.worktree then
-    vim.fn.system("git worktree remove " .. vim.fn.shellescape(agent.worktree) .. " --force")
-  end
-
   M.agents[name] = nil
 end
 
@@ -684,7 +679,31 @@ local function create_agent(name, cwd)
   return buf
 end
 
---- Create a git worktree for an agent and return its path and the repo git root, or nil, nil on failure
+--- Return the consistent worktree path for an agent slug (in the system temp dir).
+--- Resolves $TMPDIR symlinks so the path matches what git stores (macOS: /var -> /private/var).
+---@param slug string
+---@return string
+local function worktree_path_for(slug)
+  local tmpdir = (os.getenv("TMPDIR") or "/tmp"):gsub("/$", "")
+  return vim.fn.resolve(tmpdir) .. "/nvim-agent-" .. slug
+end
+
+--- Find an existing worktree path for an agent slug by parsing `git worktree list --porcelain`
+---@param slug string
+---@return string|nil
+local function find_existing_worktree(slug)
+  local expected_path = worktree_path_for(slug)
+  local output = vim.fn.system("git worktree list --porcelain 2>/dev/null")
+  -- Each worktree entry starts with "worktree <path>"; resolve symlinks before comparing
+  for path in output:gmatch("worktree ([^\n]+)") do
+    if vim.fn.resolve(path) == expected_path then
+      return path
+    end
+  end
+  return nil
+end
+
+--- Create (or reconnect to) a git worktree for an agent; returns path and git root, or nil, nil on failure
 ---@param agent_name string
 ---@return string|nil, string|nil
 local function create_worktree(agent_name)
@@ -695,13 +714,33 @@ local function create_worktree(agent_name)
   end
 
   local slug = agent_name:lower():gsub("[^%w]", "-")
-  local worktree_path = vim.fn.tempname() .. "-agent-" .. slug
-  local branch_name = "agent/" .. slug .. "-" .. os.time()
+  local worktree_path = worktree_path_for(slug)
+  local branch_name = "agent/" .. slug
 
-  local result = vim.fn.system(
-    "git worktree add -b " .. vim.fn.shellescape(branch_name)
-    .. " " .. vim.fn.shellescape(worktree_path) .. " HEAD 2>&1"
-  )
+  -- Reconnect if the worktree already exists
+  local existing = find_existing_worktree(slug)
+  if existing then
+    vim.notify("Reconnected to existing worktree: " .. existing, vim.log.levels.INFO)
+    return existing, git_root
+  end
+
+  -- Branch may already exist (worktree was removed but branch kept); try without -b first
+  vim.fn.system("git show-ref --verify --quiet refs/heads/" .. vim.fn.shellescape(branch_name) .. " 2>&1")
+  local result
+  if vim.v.shell_error == 0 then
+    -- Branch exists — add worktree without creating a new branch
+    result = vim.fn.system(
+      "git worktree add " .. vim.fn.shellescape(worktree_path)
+      .. " " .. vim.fn.shellescape(branch_name) .. " 2>&1"
+    )
+  else
+    -- Fresh: create branch and worktree together
+    result = vim.fn.system(
+      "git worktree add -b " .. vim.fn.shellescape(branch_name)
+      .. " " .. vim.fn.shellescape(worktree_path) .. " HEAD 2>&1"
+    )
+  end
+
   if vim.v.shell_error ~= 0 then
     vim.notify("Failed to create worktree:\n" .. result, vim.log.levels.ERROR)
     return nil, nil
@@ -709,6 +748,18 @@ local function create_worktree(agent_name)
 
   vim.notify("Worktree created: " .. worktree_path .. " (branch: " .. branch_name .. ")", vim.log.levels.INFO)
   return worktree_path, git_root
+end
+
+--- Check whether an agent has a persistent worktree from a previous session (without -worktree flag)
+---@param agent_name string
+---@return string|nil worktree_path, string|nil git_root
+local function find_agent_worktree(agent_name)
+  local git_root = vim.fn.system("git rev-parse --show-toplevel 2>/dev/null"):gsub("\n", "")
+  if vim.v.shell_error ~= 0 or git_root == "" then return nil, nil end
+  local slug = agent_name:lower():gsub("[^%w]", "-")
+  local existing = find_existing_worktree(slug)
+  if existing then return existing, git_root end
+  return nil, nil
 end
 
 --- Open an AI agent in a right-side split
@@ -744,6 +795,13 @@ function M.open(name, arg2)
     else
       vim.notify("Not a directory: " .. arg2, vim.log.levels.ERROR)
       return
+    end
+  else
+    -- No explicit flag — auto-reconnect to a persistent worktree if one exists
+    worktree_path, worktree_git_root = find_agent_worktree(agent_name)
+    if worktree_path then
+      cwd = worktree_path
+      vim.notify("Reconnected to existing worktree for " .. agent_name, vim.log.levels.INFO)
     end
   end
 
