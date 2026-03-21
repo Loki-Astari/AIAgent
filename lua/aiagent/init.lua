@@ -1188,7 +1188,11 @@ function M.lualine_label()
   local agent = name and M.agents[name]
   if agent and agent.buf == vim.api.nvim_get_current_buf() then
     local t = agent.agent_type or name
-    return 'Agent: ' .. t:sub(1, 1):upper() .. t:sub(2)
+    local display = t:sub(1, 1):upper() .. t:sub(2)
+    if agent.scroll_mode then
+      return 'Scroll Mode: ' .. display
+    end
+    return 'Agent: ' .. display
   end
 end
 
@@ -1197,6 +1201,9 @@ function M.lualine_color()
   local name = M.current_agent
   local agent = name and M.agents[name]
   if agent and agent.buf == vim.api.nvim_get_current_buf() then
+    if agent.scroll_mode then
+      return { bg = '#7c3aed', fg = '#ffffff' }
+    end
     return { bg = '#0891b2', fg = '#ffffff' }
   end
 end
