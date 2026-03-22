@@ -132,3 +132,47 @@ Press `<C-\><C-s>` in terminal mode to enter scroll mode (normal mode in the ter
 - **Re-entry**: cursor is restored to `agent.scroll_pos` (saved as a `{ row, col }` copy when exiting scroll mode)
 
 The `scroll_pos` is stored as `{ pos[1], pos[2] }` (an explicit copy), not a reference, to avoid Lua table aliasing bugs with `nvim_win_get_cursor`.
+
+## GitHub MCP Setup
+
+### Overview
+The GitHub MCP connector for Claude Code requires a workaround because Claude Code only supports
+Dynamic Client Registration (DCR) for OAuth, but GitHub's MCP endpoint does not support DCR.
+The fix is to use `mcp-remote` as a proxy with a pre-registered GitHub OAuth App.
+
+### Prerequisites
+- A GitHub OAuth App with:
+  - **Authorization callback URL**: `http://localhost:3334/oauth/callback`
+  - A Client ID and Client Secret
+
+To create/manage the OAuth App: https://github.com/settings/developers
+
+### Configuration
+The MCP server is configured in `~/.claude.json` via:
+
+```bash
+claude mcp add --transport stdio github -- \
+  npx mcp-remote https://api.githubcopilot.com/mcp/ \
+  --port 3334 \
+  --static-oauth-client-info '{"client_id": "YOUR_CLIENT_ID", "client_secret": "YOUR_CLIENT_SECRET"}'
+```
+
+Key details:
+- **Correct MCP endpoint**: `https://api.githubcopilot.com/mcp/` (trailing slash required)
+- **`--port 3334`** is required to pin the callback port — without it, mcp-remote picks a random port each run, breaking the OAuth callback URL match
+- **Transport**: stdio (not http), because the remote HTTP transport returns 404
+
+### Re-authenticating
+If the connection breaks, run inside Claude Code:
+```
+/mcp
+```
+Select `github` and complete the browser OAuth flow.
+
+### Gotchas
+- `https://api.github.com/mcp` (wrong) → 404
+- `https://api.githubcopilot.com/mcp/` (correct)
+- The GitHub OAuth App callback URL must exactly match the port mcp-remote uses — always use `--port 3334` to keep it stable
+- Claude.ai's GitHub connector (at claude.ai/settings/connectors) is a **separate system** from Claude Code's MCP config and they do not share state
+
+│         d
