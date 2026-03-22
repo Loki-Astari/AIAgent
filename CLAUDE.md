@@ -41,7 +41,7 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 
 ## Architecture
 
-- `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, etc.)
+- `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, `:AgentSendDiagnostics`, etc.)
 - `lua/aiagent/init.lua` - Main Lua module with all plugin logic
 - `lua/aiagent/health.lua` - Health check implementation (`:checkhealth aiagent`)
 - `doc/aiagent.txt` - Vimdoc help file (`:help aiagent`)
@@ -70,6 +70,26 @@ The following public functions provide lualine.nvim component helpers. All live 
 - The `claude.ai ` prefix is stripped from display names
 - Results are stored in the module-level `_mcp_cache` table (`{ name, connected }` per entry)
 - `_mcp_last_read` is set immediately when a refresh starts to prevent concurrent jobs
+
+## LSP Diagnostics
+
+`:AgentSendDiagnostics` collects LSP diagnostics for the current buffer via
+`vim.diagnostic.get(bufnr)` and sends a pre-formatted prompt to the active agent.
+
+Key implementation details in `M.send_diagnostics(agent_name, line1, line2)`:
+
+- `line1`/`line2` are optional 1-indexed line numbers (from a visual range); when
+  provided, diagnostics outside that range are filtered out before sending.
+- Active LSP clients are collected via `vim.lsp.get_clients({ bufnr = bufnr })`.
+  `client.config.settings` is preferred for compiler options; `client.config.init_options`
+  is used as a fallback.
+- Before sending the text, `\x1bi` is sent to the terminal to ensure the agent is
+  in insert mode (ESC exits any vim mode, `i` enters insert). This is required when
+  the agent uses vim keybindings (e.g. Claude's vim mode).
+- The message text does **not** end with `\n` — the text is typed into the prompt
+  but not submitted, so the user presses Enter to initiate the analysis.
+- The command is registered with `{ range = true }` so it can be invoked as
+  `:'<,'>AgentSendDiagnostics` from a visual selection.
 
 ## Key Patterns
 

@@ -11,6 +11,7 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 - **Clean exit handling** - The plugin properly cleans up terminal jobs when closing Neovim, preventing "job still running" warnings
 - **Buffer context integration** - Automatically send open buffer file paths to the agent, giving it context about what you're working on
 - **Visual selection support** - Select code and send it directly to the agent to ask questions about specific snippets
+- **LSP diagnostics integration** - Send compiler errors and warnings from the current file (or a visual selection of lines) to the agent, pre-formatted with file name, language server options, and context text ready for analysis
 - **Scroll mode** - Browse agent output history without leaving the window; position is remembered between sessions
 - **Git worktree support** - Isolate each agent's work in its own branch and directory, with automatic reconnect across sessions
 - **Idle attention alerts** - When a background agent finishes or pauses for input, its tab is highlighted with a `●` indicator so you know to switch back
@@ -97,6 +98,8 @@ require("aiagent").setup({
 | `:AgentSendContext` | Send open buffer file paths to the agent |
 | `:AgentResetContext` | Reset tracking to re-send all buffer paths |
 | `:'<,'>AgentSendSelection` | Send visual selection to the agent |
+| `:AgentSendDiagnostics` | Send LSP diagnostics for the current file to the agent |
+| `:'<,'>AgentSendDiagnostics` | Send LSP diagnostics for the selected lines only |
 
 ### Supported agents
 
@@ -177,11 +180,13 @@ require("aiagent").setup({
 ### Suggested Mappings
 
 ```lua
-vim.keymap.set("n", "<leader>ao", "<cmd>AgentOpen<cr>", { desc = "Open agent (default)" })
-vim.keymap.set("n", "<leader>ac", "<cmd>AgentOpen Cursor<cr>", { desc = "Open Cursor agent" })
-vim.keymap.set("n", "<leader>ax", "<cmd>AgentClose<cr>", { desc = "Close current agent" })
-vim.keymap.set("n", "<leader>at", "<cmd>AgentToggle<cr>", { desc = "Toggle current agent" })
-vim.keymap.set("v", "<leader>as", "<cmd>AgentSendSelection<cr>", { desc = "Send selection to agent" })
+vim.keymap.set("n", "<leader>ao", "<cmd>AgentOpen<cr>",             { desc = "Open agent (default)" })
+vim.keymap.set("n", "<leader>ac", "<cmd>AgentOpen Cursor<cr>",      { desc = "Open Cursor agent" })
+vim.keymap.set("n", "<leader>ax", "<cmd>AgentClose<cr>",            { desc = "Close current agent" })
+vim.keymap.set("n", "<leader>at", "<cmd>AgentToggle<cr>",           { desc = "Toggle current agent" })
+vim.keymap.set("v", "<leader>as", "<cmd>AgentSendSelection<cr>",    { desc = "Send selection to agent" })
+vim.keymap.set("n", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",  { desc = "Send LSP diagnostics to agent" })
+vim.keymap.set("v", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",  { desc = "Send LSP diagnostics (selection) to agent" })
 ```
 
 ## Buffer Context Integration
@@ -218,6 +223,37 @@ Select code in visual mode and send it to the agent to ask questions about speci
 2. Run `:'<,'>AgentSendSelection` or use your mapped key (e.g., `<leader>as`)
 3. The selected code is sent to the agent wrapped in a markdown code block with the filetype
 4. The agent terminal is focused so you can type your question
+
+If no agent is running, one will be started automatically.
+
+## LSP Diagnostics
+
+Send compiler errors and warnings from the active LSP directly to the agent, pre-formatted with enough context that the agent can start analysing immediately.
+
+### How it works
+
+1. Open a file that has LSP diagnostics (errors, warnings, etc.)
+2. Run `:AgentSendDiagnostics` (or use your mapped key, e.g. `<leader>ad`)
+3. The plugin collects diagnostics from the active LSP, formats them, and types the following into the agent's prompt:
+   - A brief description asking the agent to analyse and suggest fixes
+   - The file path
+   - The language server name(s) and their compiler/workspace settings (JSON)
+   - All diagnostics wrapped in a fenced ` ```<Errors> ` block, sorted by line and column
+4. The agent terminal is focused with the text ready — press Enter to submit
+
+The agent is always left in **insert mode** before the text is typed, so the command works correctly even when the agent uses vim keybindings.
+
+### Limiting to a visual selection
+
+To send only the diagnostics that fall within a specific range of lines, select those lines in visual mode first:
+
+```
+" Normal mode — all diagnostics in the file
+:AgentSendDiagnostics
+
+" Visual mode — only diagnostics on the selected lines
+:'<,'>AgentSendDiagnostics
+```
 
 If no agent is running, one will be started automatically.
 

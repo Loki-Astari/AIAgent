@@ -16,9 +16,10 @@ CONTENTS                                                    *aiagent-contents*
   7. Lua API ................... |aiagent-api|
   8. Git Worktrees ............. |aiagent-worktrees|
   9. Idle Attention Alerts ..... |aiagent-idle|
- 10. Bufferline Integration .... |aiagent-bufferline|
- 11. Lualine Integration ........ |aiagent-lualine|
- 12. Health check .............. |aiagent-health|
+ 10. LSP Diagnostics ........... |aiagent-diagnostics|
+ 11. Bufferline Integration .... |aiagent-bufferline|
+ 12. Lualine Integration ........ |aiagent-lualine|
+ 13. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -31,6 +32,7 @@ Neovim as a persistent terminal split. Features include:
   - Per-agent color theming via the agent's own /color command
   - Git worktree support (isolated branches per agent)
   - Visual selection and open-buffer context sending
+  - LSP diagnostics integration (whole file or visual range)
   - Scroll mode with position memory
   - Bufferline tab integration
   - Idle attention alerts when a background agent finishes or needs input
@@ -232,6 +234,33 @@ known_agents ~
   Send the visual selection to the current agent as a markdown code
   block. Opens the agent if not already running.
 
+                                                  *:AgentSendDiagnostics*
+:{range}AgentSendDiagnostics
+  Collect LSP diagnostics for the current buffer and send them to the
+  agent as a formatted prompt. The agent is focused and left in insert
+  mode with the text ready — press Enter to start the analysis.
+
+  Without a range, all diagnostics in the current file are included.
+  With a range (e.g. `:'<,'>AgentSendDiagnostics`), only diagnostics
+  whose line falls within the selected lines are included.
+
+  The prompt includes:
+    - A brief description asking the agent to analyse and suggest fixes
+    - The full file path
+    - Active language server name(s) and their compiler/workspace settings
+    - All matching diagnostics sorted by line and column, wrapped in a
+      fenced ```` ```<Errors> ```` block with severity, line, column,
+      message, and source
+
+  Diagnostics are sorted by line then column. Severity labels used:
+    ERROR   vim.diagnostic.severity.ERROR
+    WARN    vim.diagnostic.severity.WARN
+    INFO    vim.diagnostic.severity.INFO
+    HINT    vim.diagnostic.severity.HINT
+
+  Opens the agent if not already running.
+  See also |aiagent.send_diagnostics()|.
+
 ==============================================================================
 6. KEYMAPS                                                 *aiagent-keymaps*
 
@@ -305,6 +334,19 @@ pending_context_count({agent_name})
                                           *aiagent.send_selection()*
 send_selection({agent_name})
   Send the last visual selection as a markdown code block.
+
+                                        *aiagent.send_diagnostics()*
+send_diagnostics({agent_name}, {line1}, {line2})
+  Collect LSP diagnostics for the current buffer and send a formatted
+  prompt to the agent. Programmatic equivalent of |:AgentSendDiagnostics|.
+
+  {agent_name}  string|nil  Agent to target (default: current agent)
+  {line1}       number|nil  First line of range, 1-indexed (nil = whole file)
+  {line2}       number|nil  Last line of range, 1-indexed (nil = whole file)
+
+  Before sending, `\x1bi` is written to the terminal pty so that agents
+  using vim keybindings (e.g. Claude's vim mode) are guaranteed to be in
+  insert mode.
 
                                                  *aiagent.is_open()*
 is_open()
@@ -458,7 +500,60 @@ Configuration ~
 <
 
 ==============================================================================
-10. BUFFERLINE INTEGRATION                               *aiagent-bufferline*
+10. LSP DIAGNOSTICS                                     *aiagent-diagnostics*
+
+|:AgentSendDiagnostics| collects LSP diagnostics for the current buffer via
+`vim.diagnostic.get()` and sends a structured prompt to the agent.
+
+Whole-file usage ~
+>
+  :AgentSendDiagnostics
+<
+  All diagnostics for the current buffer are included.
+
+Range usage ~
+>
+  :'<,'>AgentSendDiagnostics
+<
+  Only diagnostics whose line falls within the visual selection are sent.
+  Useful for focusing on a specific function or block.
+
+Prompt structure ~
+
+  The message typed into the agent prompt contains:
+
+    1. A brief instruction asking the agent to analyse and suggest fixes
+    2. `**File:** /absolute/path/to/file`
+    3. `**Language Server(s) and compiler options:**` listing each active
+       LSP client and its `config.settings` (or `init_options`) as JSON
+    4. `**Errors:**` followed by a fenced block:
+>
+       ```<Errors>
+       [ERROR] line 10, col 5: Undefined variable 'x' (lua_ls)
+       [WARN]  line 14, col 1: Unused import (lua_ls)
+       ```
+<
+    5. A closing instruction to explain what is wrong and how to fix it
+
+  The text is NOT submitted automatically — the agent is focused in insert
+  mode with the prompt ready, and the user presses Enter to send.
+
+Vim mode compatibility ~
+
+  Before the text is sent, `<Esc>i` is written to the terminal pty. This
+  ensures agents with vim keybindings (such as Claude's vim mode) are in
+  insert mode regardless of their previous state.
+
+Suggested mapping ~
+>lua
+  vim.keymap.set("n", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",
+    { desc = "Send LSP diagnostics to agent" })
+  vim.keymap.set("v", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",
+    { desc = "Send LSP diagnostics (selection) to agent" })
+<
+
+==============================================================================
+11. BUFFERLINE INTEGRATION                              *aiagent-bufferline*
 
 To prefix worktree-redirected buffer tabs with the worktree slug, pass the
 `bufferline_name_formatter` function to bufferline's `name_formatter` option:
@@ -473,7 +568,7 @@ Tabs for worktree files will display as `slug: filename` (e.g.
 `feature: main.cpp`). Non-worktree buffers are unaffected.
 
 ==============================================================================
-11. LUALINE INTEGRATION                                    *aiagent-lualine*
+12. LUALINE INTEGRATION                                    *aiagent-lualine*
 
 AIAgent provides optional helpers for lualine.nvim that surface agent state
 in your statusline. None of these require any setup beyond adding them to
@@ -564,7 +659,7 @@ Carousel scroll ~                               *aiagent-lualine-mcp-scroll*
 <
 
 ==============================================================================
-12. HEALTH CHECK                                           *aiagent-health*
+13. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 
