@@ -11,6 +11,8 @@ M.config = {
   scroll_start_line = 9,      -- Line to jump to when first entering scroll mode
   idle_timeout_ms = 8000,     -- ms of silence after activity before flagging (0 = disabled)
   idle_notify     = false,    -- also fire vim.notify when flagging attention
+  mcp_max_width   = 35,       -- max statusline columns for MCP display before scrolling
+  mcp_scroll      = true,     -- scroll MCP display when wider than mcp_max_width
   colors = { "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" },
   -- Map of symbolic names to CLI executables. Extend this in setup() for custom agents.
   known_agents = {
@@ -1184,8 +1186,10 @@ end
 ---   { function() return require('aiagent').lualine_mcp_server(1) end,
 ---     color = function() return require('aiagent').lualine_mcp_color(1) end },
 
-local _mcp_cache     = nil   -- list of { name, connected } populated by `claude mcp list`
-local _mcp_last_read = 0
+local _mcp_cache        = nil  -- list of { name, connected } populated by `claude mcp list`
+local _mcp_last_read    = 0
+local _mcp_scroll_pos   = 0    -- raw ever-incrementing counter
+local _mcp_scroll_timer = nil
 
 local function _ensure_mcp_cache()
   local now = vim.uv.now()
@@ -1216,18 +1220,62 @@ local function _ensure_mcp_cache()
   })
 end
 
---- Returns a single string listing all MCP servers with ✓/✗ per server.
+local function _mcp_start_scroll()
+  if _mcp_scroll_timer then return end
+  _mcp_scroll_timer = vim.uv.new_timer()
+  _mcp_scroll_timer:start(300, 300, vim.schedule_wrap(function()
+    _mcp_scroll_pos = _mcp_scroll_pos + 1
+    if _mcp_scroll_pos > 100000 then _mcp_scroll_pos = 0 end
+    require('lualine').refresh()
+  end))
+end
+
+local function _mcp_stop_scroll()
+  if _mcp_scroll_timer then
+    _mcp_scroll_timer:stop()
+    _mcp_scroll_timer:close()
+    _mcp_scroll_timer = nil
+    _mcp_scroll_pos   = 0
+  end
+end
+
+--- Returns a carousel string for connected MCP servers.
+--- Static when content fits within MCP_MAX_WIDTH, scrolling when wider.
 ---@return string
 function M.lualine_mcp()
   _ensure_mcp_cache()
-  if not _mcp_cache then return '' end
-  if #_mcp_cache == 0 then return '' end
-  local parts = {}
+  if not _mcp_cache or #_mcp_cache == 0 then
+    _mcp_stop_scroll()
+    return ''
+  end
+
+  local prefix = 'MCP: '
+  local parts  = {}
   for _, server in ipairs(_mcp_cache) do
     table.insert(parts, '\u{2713} ' .. server.name)
   end
-  if #parts == 0 then return '' end
-  return 'MCP: ' .. table.concat(parts, '  ')
+  local server_text = table.concat(parts, '  ')
+  local full        = prefix .. server_text
+
+  if not M.config.mcp_scroll or vim.fn.strdisplaywidth(full) <= M.config.mcp_max_width then
+    _mcp_stop_scroll()
+    return full
+  end
+
+  -- Content wider than max: show a scrolling window
+  local scroll_width = M.config.mcp_max_width - vim.fn.strdisplaywidth(prefix)
+  local sep          = '   '
+  local loop_text    = server_text .. sep
+  local loop_len     = vim.fn.strchars(loop_text)
+  local pos          = _mcp_scroll_pos % loop_len
+  -- Double the loop so the window never runs off the end
+  local window = vim.fn.strcharpart(loop_text .. server_text, pos, scroll_width)
+  -- Pad to fixed width so the component doesn't resize
+  local pad = scroll_width - vim.fn.strdisplaywidth(window)
+  if pad > 0 then window = window .. string.rep(' ', pad) end
+
+  _mcp_start_scroll()
+  return prefix .. window
 end
 
 --- Color for the MCP component: green if all connected, red if any failed, grey while loading.
