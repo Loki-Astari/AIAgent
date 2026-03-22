@@ -50,6 +50,27 @@ The plugin manages state via module-level variables (`M.agents`, `M.current_agen
 
 Each agent entry in `M.agents[name]` tracks: `buf`, `job_id`, `scroll_mode`, `scroll_pos`, `agent_type`, `command`, `sent_files`, `color`, `worktree` (path or nil), `git_root` (repo root or nil), `slug` (worktree slug or nil).
 
+## Lualine Integration
+
+The following public functions provide lualine.nvim component helpers. All live on the `M` table in `lua/aiagent/init.lua`.
+
+| Function | Returns | Purpose |
+|----------|---------|---------|
+| `M.lualine_label()` | `string\|nil` | `"Agent: Claude"` or `"Scroll Mode: Claude"` when the agent terminal is focused; `nil` otherwise |
+| `M.lualine_color()` | `table\|nil` | `{ bg = '#0891b2' }` (cyan) for input mode, `{ bg = '#7c3aed' }` (purple) for scroll mode; `nil` otherwise |
+| `M.lualine_branch()` | `string\|nil` | Actual branch of the agent's worktree (via `git branch --show-current`), or `nil` when not focused on the agent terminal |
+| `M.lualine_mcp()` | `string` | Space-separated list of `✓ name` for each connected MCP server |
+| `M.lualine_mcp_color()` | `table\|nil` | `{ fg = '#22c55e' }` (green) when results are loaded; grey while pending |
+| `M.mcp_refresh()` | — | Clears the MCP cache and triggers an immediate `claude mcp list` refresh |
+
+### MCP status implementation
+
+- `claude mcp list` is run as an async job (`vim.fn.jobstart`) on first use and every 30 seconds thereafter
+- Only lines matching `✓ Connected` are kept; `claude.ai` auto-discovered servers are filtered out
+- The `claude.ai ` prefix is stripped from display names
+- Results are stored in the module-level `_mcp_cache` table (`{ name, connected }` per entry)
+- `_mcp_last_read` is set immediately when a refresh starts to prevent concurrent jobs
+
 ## Key Patterns
 
 - Use `pcall` for all window/buffer operations that might fail during cleanup

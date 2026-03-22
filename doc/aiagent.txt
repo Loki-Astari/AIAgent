@@ -17,7 +17,8 @@ CONTENTS                                                    *aiagent-contents*
   8. Git Worktrees ............. |aiagent-worktrees|
   9. Idle Attention Alerts ..... |aiagent-idle|
  10. Bufferline Integration .... |aiagent-bufferline|
- 11. Health check .............. |aiagent-health|
+ 11. Lualine Integration ........ |aiagent-lualine|
+ 12. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -33,6 +34,7 @@ Neovim as a persistent terminal split. Features include:
   - Scroll mode with position memory
   - Bufferline tab integration
   - Idle attention alerts when a background agent finishes or needs input
+  - Lualine integration: agent mode, worktree branch, and MCP server status
 
 ==============================================================================
 2. REQUIREMENTS                                         *aiagent-requirements*
@@ -70,6 +72,8 @@ Full example: >lua
     scroll_start_line   = 9,
     idle_timeout_ms     = 8000,
     idle_notify         = false,
+    mcp_max_width       = 35,
+    mcp_scroll          = true,
     colors = { "red", "blue", "orange", "green", "yellow",
                "magenta", "cyan", "purple" },
     known_agents = {
@@ -141,6 +145,22 @@ colors ~
   Default: `{ "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" }`
   Color cycle used when opening new agents. Each new agent gets the next
   color. Colors are sent to the agent via its `/color` command.
+
+                                           *aiagent-config-mcp_max_width*
+mcp_max_width ~
+  Type: number  Default: `35`
+  Maximum display-column width for the MCP status component in lualine
+  before the carousel scroll activates. Increase this if your server
+  names are long and you want more of them visible at once.
+  See |aiagent-lualine-mcp|.
+
+                                              *aiagent-config-mcp_scroll*
+mcp_scroll ~
+  Type: boolean  Default: `true`
+  When `true`, the MCP status component scrolls through server names in
+  a carousel when the total width exceeds |aiagent-config-mcp_max_width|.
+  Set to `false` to always show the full list without scrolling.
+  See |aiagent-lualine-mcp|.
 
                                             *aiagent-config-known_agents*
 known_agents ~
@@ -306,6 +326,57 @@ close_all()
 bufferline_name_formatter({buf})
   Name formatter for bufferline.nvim. See |aiagent-bufferline|.
 
+                                                *aiagent.lualine_label()*
+lualine_label()
+  Returns a display string for lualine section A when the current buffer
+  is the active agent terminal. Returns `nil` otherwise (caller should
+  fall back to the normal mode string).
+
+  Values returned:
+    `"Agent: Claude"`       agent terminal in input mode
+    `"Scroll Mode: Claude"` agent terminal in scroll mode
+    nil                     any other buffer
+
+                                                *aiagent.lualine_color()*
+lualine_color()
+  Returns a lualine color table for the section A component, or `nil`
+  when not in the agent terminal (allowing the theme default).
+
+  Values returned:
+    `{ bg = '#0891b2', fg = '#ffffff' }`  input mode  (cyan)
+    `{ bg = '#7c3aed', fg = '#ffffff' }`  scroll mode (purple)
+    nil                                   other buffers
+
+                                               *aiagent.lualine_branch()*
+lualine_branch()
+  Returns the current git branch of the active agent's worktree when
+  the agent terminal is focused (determined via `git branch --show-current`
+  in the worktree directory). Returns `nil` otherwise.
+
+  Typical lualine usage (falls back to gitsigns for normal buffers): >lua
+    function()
+      return require('aiagent').lualine_branch()
+          or vim.b.gitsigns_head or ''
+    end
+<
+                                                  *aiagent.lualine_mcp()*
+lualine_mcp()
+  Returns a string listing all connected MCP servers, suitable for a
+  lualine component. See |aiagent-lualine-mcp|.
+
+                                            *aiagent.lualine_mcp_color()*
+lualine_mcp_color()
+  Returns `{ fg = '#22c55e' }` (green) once the MCP server list has
+  loaded, or `{ fg = '#94a3b8' }` (grey) while the initial query is
+  still running.
+
+                                                 *aiagent.mcp_refresh()*
+mcp_refresh()
+  Clears the MCP server cache and immediately triggers a fresh
+  `claude mcp list` query. Use this after changing your Claude MCP
+  configuration so the statusline updates without waiting for the
+  30-second cache to expire.
+
 ==============================================================================
 8. GIT WORKTREES                                          *aiagent-worktrees*
 
@@ -402,7 +473,98 @@ Tabs for worktree files will display as `slug: filename` (e.g.
 `feature: main.cpp`). Non-worktree buffers are unaffected.
 
 ==============================================================================
-11. HEALTH CHECK                                           *aiagent-health*
+11. LUALINE INTEGRATION                                    *aiagent-lualine*
+
+AIAgent provides optional helpers for lualine.nvim that surface agent state
+in your statusline. None of these require any setup beyond adding them to
+your lualine configuration.
+
+Section A — Agent mode ~                              *aiagent-lualine-mode*
+
+  Replaces the standard mode indicator with the agent name and current
+  mode when the agent terminal window is focused: >lua
+
+    lualine_a = {
+      {
+        function()
+          return require('aiagent').lualine_label()
+              or require('lualine.utils.mode').get_mode()
+        end,
+        color = function()
+          return require('aiagent').lualine_color()
+        end,
+      },
+    },
+<
+  The component color changes automatically:
+    Cyan   (#0891b2)  when in normal agent input mode
+    Purple (#7c3aed)  when in scroll mode
+    Theme default     for all other buffers
+
+Section B — Worktree branch ~                        *aiagent-lualine-branch*
+
+  Shows the real git branch of the active agent's worktree when the agent
+  terminal is focused. Falls back to gitsigns for all other buffers: >lua
+
+    lualine_b = {
+      {
+        function()
+          return require('aiagent').lualine_branch()
+              or vim.b.gitsigns_head or ''
+        end,
+        icon = '\u{E0A0}',
+      },
+      'diff', 'diagnostics',
+    },
+<
+  The branch is read with `git -C {worktree} branch --show-current` so it
+  reflects the actual checked-out branch, not an assumed name.
+
+Section X — MCP server status ~                         *aiagent-lualine-mcp*
+
+  Displays connected MCP servers queried from `claude mcp list`. Results
+  are cached for 30 seconds. Only servers reported as `✓ Connected` are
+  shown; auto-discovered `claude.ai` servers are filtered out. >lua
+
+    lualine_x = {
+      {
+        function() return require('aiagent').lualine_mcp() end,
+        color = function() return require('aiagent').lualine_mcp_color() end,
+      },
+      'encoding', 'filetype',
+    },
+<
+  Example output: >
+    MCP: ✓ atlassian  ✓ github
+<
+
+Carousel scroll ~                               *aiagent-lualine-mcp-scroll*
+
+  When the MCP server list is wider than |aiagent-config-mcp_max_width|
+  columns, the component switches to a fixed-width scrolling carousel:
+
+  - A window of `mcp_max_width` columns slides through the server list
+  - The window advances one character every 300 ms via a `vim.uv` timer
+  - The loop is seamless: a separator gap (`   `) is appended before the
+    text repeats, so the scroll wraps smoothly
+  - The component is padded to a fixed width so the statusline does not
+    resize as the text scrolls
+  - The timer is stopped automatically when the content fits within
+    `mcp_max_width` (e.g. after servers disconnect) or when there are no
+    servers to display
+
+  To disable scrolling: >lua
+    require('aiagent').setup({ mcp_scroll = false })
+<
+  To widen the display area: >lua
+    require('aiagent').setup({ mcp_max_width = 50 })
+<
+  To force an immediate refresh after changing Claude config: >lua
+    require('aiagent').mcp_refresh()
+<
+
+==============================================================================
+12. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 

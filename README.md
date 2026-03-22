@@ -14,6 +14,7 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 - **Scroll mode** - Browse agent output history without leaving the window; position is remembered between sessions
 - **Git worktree support** - Isolate each agent's work in its own branch and directory, with automatic reconnect across sessions
 - **Idle attention alerts** - When a background agent finishes or pauses for input, its tab is highlighted with a `●` indicator so you know to switch back
+- **Lualine integration** - Optional helpers for lualine.nvim: shows the active agent name and mode in section A, the worktree branch in section B, and connected MCP servers in section X
 
 ## Requirements
 
@@ -70,6 +71,8 @@ require("aiagent").setup({
   scroll_start_line = 9,      -- line to jump to when first entering scroll mode
   idle_timeout_ms = 8000,     -- ms of silence after activity before flagging (0 = disabled)
   idle_notify = false,        -- also fire vim.notify when flagging attention
+  mcp_max_width = 35,         -- max statusline columns for MCP display before scrolling
+  mcp_scroll = true,          -- scroll MCP display when wider than mcp_max_width
   -- Extend or override the built-in agent → executable mapping
   known_agents = {
     mytool = "my-custom-cli",
@@ -307,6 +310,79 @@ require('bufferline').setup({
 ```
 
 Tabs for worktree files will display as `slug: filename` (e.g. `feature: main.cpp`). Non-worktree buffers are unaffected.
+
+## Lualine Integration
+
+AIAgent provides helpers for [lualine.nvim](https://github.com/nvim-lualine/lualine.nvim) that surface agent state directly in your statusline.
+
+### Section A — Agent mode
+
+Replaces the standard mode indicator with the active agent's type and mode when the agent terminal is focused:
+
+| State | Display | Color |
+|-------|---------|-------|
+| Normal editing | `NORMAL` / `INSERT` / … | theme default |
+| Agent terminal (input) | `Agent: Claude` | cyan |
+| Agent terminal (scroll) | `Scroll Mode: Claude` | purple |
+
+```lua
+lualine_a = {
+  {
+    function()
+      return require('aiagent').lualine_label()
+          or require('lualine.utils.mode').get_mode()
+    end,
+    color = function() return require('aiagent').lualine_color() end,
+  },
+},
+```
+
+### Section B — Branch
+
+Shows the active agent's worktree branch when the agent terminal is focused, falling back to the normal gitsigns branch elsewhere:
+
+```lua
+lualine_b = {
+  {
+    function()
+      return require('aiagent').lualine_branch()
+          or vim.b.gitsigns_head
+          or ''
+    end,
+    icon = '\u{E0A0}',
+  },
+  'diff', 'diagnostics',
+},
+```
+
+### Section X — MCP server status
+
+Displays connected MCP servers (queried via `claude mcp list`, cached for 30 seconds). Only servers reported as `✓ Connected` are shown; `claude.ai` auto-discovered servers are filtered out.
+
+```lua
+lualine_x = {
+  {
+    function() return require('aiagent').lualine_mcp() end,
+    color = function() return require('aiagent').lualine_mcp_color() end,
+  },
+  'encoding', 'filetype',
+},
+```
+
+To force a refresh after changing your Claude MCP configuration:
+
+```lua
+:lua require('aiagent').mcp_refresh()
+```
+
+**Configuration:**
+
+```lua
+require('aiagent').setup({
+  mcp_max_width = 35,   -- columns before scrolling kicks in
+  mcp_scroll    = true, -- set false to show full list without scrolling
+})
+```
 
 ## Health Check
 
