@@ -1177,6 +1177,73 @@ function M.lualine_branch()
   end
 end
 
+--- MCP server lualine helpers.
+--- Each server gets its own slot (lualine_mcp_server(n) / lualine_mcp_color(n)).
+--- Empty string return causes lualine to hide the component automatically.
+--- Usage in lualine setup (add as many slots as you expect servers):
+---   { function() return require('aiagent').lualine_mcp_server(1) end,
+---     color = function() return require('aiagent').lualine_mcp_color(1) end },
+
+local _mcp_cache     = nil   -- list of { name, connected } populated by `claude mcp list`
+local _mcp_last_read = 0
+
+local function _ensure_mcp_cache()
+  local now = vim.uv.now()
+  if _mcp_cache and (now - _mcp_last_read) < 30000 then return end
+  _mcp_last_read = now   -- set immediately to prevent concurrent refreshes
+  local lines = {}
+  vim.fn.jobstart({ 'claude', 'mcp', 'list' }, {
+    on_stdout = function(_, data)
+      for _, line in ipairs(data) do
+        if line ~= '' then table.insert(lines, line) end
+      end
+    end,
+    on_exit = function()
+      local servers = {}
+      for _, line in ipairs(lines) do
+        -- Format: "name: url [(type)] - ✓ Connected / ✗ Failed / ! Needs authentication"
+        -- Format: "name: <command or url> - ✓/✗/! status"
+        local name = line:match('^([^:]+):%s+.+%s+%-%s+[✓✗!]')
+        local connected = name and line:match('\u{2713}%s+Connected') ~= nil
+        if name and connected then
+          local display = name:gsub('^claude%.ai%s+', '')
+          table.insert(servers, { name = display, connected = true })
+        end
+      end
+      _mcp_cache = servers
+      vim.schedule(function() require('lualine').refresh() end)
+    end,
+  })
+end
+
+--- Returns a single string listing all MCP servers with ✓/✗ per server.
+---@return string
+function M.lualine_mcp()
+  _ensure_mcp_cache()
+  if not _mcp_cache then return '' end
+  if #_mcp_cache == 0 then return '' end
+  local parts = {}
+  for _, server in ipairs(_mcp_cache) do
+    table.insert(parts, '\u{2713} ' .. server.name)
+  end
+  if #parts == 0 then return '' end
+  return 'MCP: ' .. table.concat(parts, '  ')
+end
+
+--- Color for the MCP component: green if all connected, red if any failed, grey while loading.
+---@return table|nil
+function M.lualine_mcp_color()
+  if not _mcp_cache then return { fg = '#94a3b8' } end
+  return { fg = '#22c55e' }
+end
+
+--- Force an immediate MCP status refresh (e.g. after changing claude config).
+function M.mcp_refresh()
+  _mcp_cache     = nil
+  _mcp_last_read = 0
+  _ensure_mcp_cache()
+end
+
 --- lualine component helpers for section A.
 --- When the current buffer is an agent terminal, returns the label and color
 --- to display. Returns nil for both when not in an agent buffer.
