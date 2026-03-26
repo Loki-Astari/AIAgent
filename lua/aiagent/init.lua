@@ -1418,6 +1418,94 @@ function M.mcp_refresh()
   _ensure_mcp_cache()
 end
 
+--- Model lualine helper.
+--- Reads the model from Claude Code's session JSONL:
+---   ~/.claude/sessions/{pid}.json  → sessionId + cwd
+---   ~/.claude/projects/{escaped-cwd}/{sessionId}.jsonl  → last assistant message → message.model
+---
+--- Usage in lualine setup:
+---   { function() return require('aiagent').lualine_model() end }
+
+local _model_cache     = nil   -- string (model name) or nil when unavailable
+local _model_last_read = 0
+local _model_pid       = nil   -- pid used for last read; cache invalidates on pid change
+
+--- Escape a filesystem path the way Claude Code does for its project directory names.
+--- Rule: replace every character that is not a letter, digit, or hyphen with '-'.
+local function _cwd_to_project_dir(cwd)
+  return cwd:gsub('[^%w%-]', '-')
+end
+
+--- Read the last `nbytes` of a file synchronously; returns string or nil on failure.
+local function _read_tail(path, nbytes)
+  local fd = vim.uv.fs_open(path, 'r', 0)
+  if not fd then return nil end
+  local stat = vim.uv.fs_fstat(fd)
+  if not stat then vim.uv.fs_close(fd); return nil end
+  local offset = math.max(0, stat.size - nbytes)
+  local data = vim.uv.fs_read(fd, nbytes, offset)
+  vim.uv.fs_close(fd)
+  return data
+end
+
+--- Look up the model string from Claude Code's JSONL for a running process PID.
+local function _model_from_pid(pid)
+  local session = _read_json(vim.fn.expand('~/.claude/sessions/' .. pid .. '.json'))
+  if not session or not session.sessionId or not session.cwd then return nil end
+
+  local project_dir = _cwd_to_project_dir(session.cwd)
+  local jsonl_path = vim.fn.expand(
+    '~/.claude/projects/' .. project_dir .. '/' .. session.sessionId .. '.jsonl'
+  )
+
+  -- Read the last 8 KB — enough to contain the most recent assistant message.
+  local tail = _read_tail(jsonl_path, 8192)
+  if not tail then return nil end
+
+  -- Scan backwards through lines for the last assistant entry that has message.model.
+  local lines = vim.split(tail, '\n', { plain = true })
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line ~= '' then
+      local ok, entry = pcall(vim.fn.json_decode, line)
+      if ok and type(entry) == 'table'
+         and entry.type == 'assistant'
+         and type(entry.message) == 'table'
+         and type(entry.message.model) == 'string' then
+        return entry.message.model
+      end
+    end
+  end
+  return nil
+end
+
+local function _ensure_model_cache()
+  local agent = M.current_agent and M.agents[M.current_agent]
+  if not agent or not agent.job_id then
+    _model_cache = nil
+    return
+  end
+  local pid = vim.fn.jobpid(agent.job_id)
+  if not pid or pid == 0 then
+    _model_cache = nil
+    return
+  end
+  local now = vim.uv.now()
+  if _model_pid == pid and (now - _model_last_read) < 10000 then return end
+  _model_last_read = now
+  _model_pid       = pid
+  _model_cache     = _model_from_pid(pid)
+end
+
+--- lualine component: the model used by the active Claude agent.
+--- Returns a short name (e.g. "sonnet-4-6") or "" when unavailable.
+function M.lualine_model()
+  _ensure_model_cache()
+  if not _model_cache then return '' end
+  -- Strip the "claude-" vendor prefix for a compact display.
+  return (_model_cache:gsub('^claude%-', ''))
+end
+
 --- lualine component helpers for section A.
 --- When the current buffer is an agent terminal, returns the label and color
 --- to display. Returns nil for both when not in an agent buffer.
@@ -1429,7 +1517,7 @@ function M.lualine_label()
   local agent = name and M.agents[name]
   if agent and agent.buf == vim.api.nvim_get_current_buf() then
     local t = agent.agent_type or name
-    local display = t:sub(1, 1):upper() .. t:sub(2)
+    local display = t:sub(1, 1):upper() .. t:sub(2) .. ":" .. M.lualine_model()
     if agent.scroll_mode then
       return 'Scroll Mode: ' .. display
     end
