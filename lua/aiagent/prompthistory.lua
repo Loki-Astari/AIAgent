@@ -5,11 +5,13 @@
 -- Layout (opened in its own tabpage so the Claude terminal in M.win is never
 -- disturbed; closing the tab returns you to the chat):
 --
---   +--------+-----------------+-----------------+
+--   +---------+-----------------+-----------------+
 --   | prompts |  before         |  after          |   native :diffthis pair
---   | (list)  +-----------------+-----------------+
---   |         |  changed files (this prompt)      |
---   +--------+-----------------------------------+
+--   | (list)  |                 |                 |
+--   +---------+-----------------+-----------------+
+--   | changed |  full prompt text                 |
+--   | files   |                                   |
+--   +---------+-----------------------------------+
 --
 -- Move the cursor in the prompt list to pick a prompt; move it in the files
 -- list to pick a file. Diffs are reconstructed from the stored git trees with
@@ -78,6 +80,36 @@ function M.list_sessions(dir)
   end
   table.sort(sessions, function(a, b) return a.mtime > b.mtime end)
   return sessions
+end
+
+--- Read the active-session override for the repo containing dir, or nil if unset.
+---@param dir string
+---@return string|nil
+function M.active_session(dir)
+  local hist_dir = history_dir(dir or vim.fn.getcwd())
+  if not hist_dir then return nil end
+  local path = hist_dir .. "/active-session"
+  local f = io.open(path, "r")
+  if not f then return nil end
+  local id = f:read("*l")
+  f:close()
+  return (id and id ~= "") and id or nil
+end
+
+--- Set or clear the active-session override.
+---@param dir string
+---@param session_id string|nil  nil to clear (revert to default)
+function M.set_active_session(dir, session_id)
+  local hist_dir = history_dir(dir or vim.fn.getcwd())
+  if not hist_dir then return end
+  local path = hist_dir .. "/active-session"
+  if session_id then
+    vim.fn.mkdir(hist_dir, "p")
+    local f = io.open(path, "w")
+    if f then f:write(session_id .. "\n"); f:close() end
+  else
+    os.remove(path)
+  end
 end
 
 --- File contents at a given tree, as lines. Empty list if the path is absent
@@ -212,6 +244,19 @@ local function render_list()
   pcall(vim.api.nvim_win_set_cursor, s.wins.list, { s.idx, 0 })
 end
 
+--- Render the full prompt text for the currently selected prompt.
+local function render_prompt_detail()
+  local s = M.state
+  if not vim.api.nvim_win_is_valid(s.wins.prompt) then return end
+  local buf = vim.api.nvim_win_get_buf(s.wins.prompt)
+  local rec = s.records[s.idx]
+  local text = rec and rec.prompt or ""
+  local lines = vim.split(text, "\n", { plain = true })
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+end
+
 --- Load prompt i: compute its changed files, reset to the first file, redraw.
 local function load_prompt(i)
   local s = M.state
@@ -222,6 +267,7 @@ local function load_prompt(i)
   s.file_idx = 1
   render_files()
   render_diff()
+  render_prompt_detail()
 end
 
 -- ---------------------------------------------------------------------------
@@ -265,7 +311,8 @@ local INSTRUCTIONS = {
 
 --- Build the layout in a new tabpage:
 ---   left column (30%): instructions, prompts, files (stacked top→bottom)
----   right column (70%): before | after diff (full height)
+---   right column top (70%): before | after diff
+---   right column bottom: full prompt text
 --- Returns the window handles.
 local function build_layout()
   vim.cmd("tabnew")
@@ -283,7 +330,12 @@ local function build_layout()
   vim.cmd("belowright split")
   local files = vim.api.nvim_get_current_win()
 
-  -- Right column: split the diff area into before | after.
+  -- Right column: split into top (diff) and bottom (prompt detail).
+  vim.api.nvim_set_current_win(diff_area)
+  vim.cmd("belowright split")
+  local prompt = vim.api.nvim_get_current_win()
+
+  -- Top right: split the diff area into before | after.
   vim.api.nvim_set_current_win(diff_area)
   local before = diff_area
   vim.cmd("rightbelow vsplit")
@@ -293,6 +345,7 @@ local function build_layout()
   vim.api.nvim_win_set_buf(instructions, make_panel_buf("prompt-history://help"))
   vim.api.nvim_win_set_buf(list, make_panel_buf("prompt-history://prompts"))
   vim.api.nvim_win_set_buf(files, make_panel_buf("prompt-history://files"))
+  vim.api.nvim_win_set_buf(prompt, make_panel_buf("prompt-history://prompt"))
 
   for _, w in ipairs({ instructions, list, files }) do
     vim.wo[w].number = false
@@ -303,14 +356,21 @@ local function build_layout()
   vim.wo[list].winbar = "PROMPTS"
   vim.wo[files].cursorline = true
   vim.wo[files].winbar = "CHANGED FILES"
+  vim.wo[prompt].number = false
+  vim.wo[prompt].relativenumber = false
+  vim.wo[prompt].wrap = true
+  vim.wo[prompt].linebreak = true
+  vim.wo[prompt].winbar = "PROMPT"
 
   -- Sizing: left column 30% of screen; instructions and files fixed height so
-  -- the prompt list absorbs the slack.
+  -- the prompt list absorbs the slack. Prompt detail fixed at 8 lines.
   vim.api.nvim_win_set_width(instructions, math.floor(vim.o.columns * 0.30))
   vim.api.nvim_win_set_height(instructions, #INSTRUCTIONS)
   vim.wo[instructions].winfixheight = true
   vim.api.nvim_win_set_height(files, 10)
   vim.wo[files].winfixheight = true
+  vim.api.nvim_win_set_height(prompt, 8)
+  vim.wo[prompt].winfixheight = true
 
   -- Equalize the free dimensions: before|after to the same width and the
   -- prompt list to the leftover height. winfixwidth/winfixheight above keep the
@@ -318,7 +378,7 @@ local function build_layout()
   vim.cmd("wincmd =")
 
   return { tab = tab, instructions = instructions, list = list,
-           before = before, after = after, files = files }
+           before = before, after = after, files = files, prompt = prompt }
 end
 
 --- Fill the instructions pane (static content).
@@ -372,7 +432,7 @@ function M.open_for(session, git_root, dir)
     guard = false,         -- re-entrancy guard for CursorMoved
   }
 
-  for _, w in pairs({ wins.instructions, wins.list, wins.before, wins.after, wins.files }) do
+  for _, w in pairs({ wins.instructions, wins.list, wins.before, wins.after, wins.files, wins.prompt }) do
     set_keymaps(vim.api.nvim_win_get_buf(w))
   end
   render_instructions(wins.instructions)

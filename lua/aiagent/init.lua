@@ -597,7 +597,7 @@ local function update_header()
   local lines = {
     "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-v> paste reg",
     "<C-\\><C-c> send context | <C-\\><C-a> cycle agents",
-    "<C-\\><C-r> search input",
+    "<C-\\><C-d> diff viewer | <C-\\><C-r> search input",
   }
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
@@ -920,6 +920,14 @@ local function create_agent(name, cwd)
       if text ~= "" then
         send_to_terminal(name, text)
       end
+    end,
+  })
+
+  -- Open the prompt-history diff viewer for the current session.
+  vim.api.nvim_buf_set_keymap(buf, "t", "<C-\\><C-d>", "", {
+    noremap = true,
+    callback = function()
+      M.prompt_history_open()
     end,
   })
 
@@ -1832,17 +1840,58 @@ end
 --- the agent's cwd serves as both the git root and the .prompt-history anchor.
 ---@param session string|nil Explicit session id (nil = resolve current agent)
 function M.prompt_history_open(session)
+  local ph = require('aiagent.prompthistory')
   local cur = M.current_session()
   local cwd = (cur and cur.cwd) or vim.fn.getcwd()
-  session = session or (cur and cur.id)
+  session = session or ph.active_session(cwd) or (cur and cur.id)
   if not session then
     vim.notify("AgentDiff: no active session; pass a session id (:AgentDiff <id>)",
       vim.log.levels.ERROR)
     return
   end
-  local ph = require('aiagent.prompthistory')
   if ph.state then ph.close() end  -- refresh: pick up newly captured prompts
   ph.open_for(session, cwd, cwd)
+end
+
+--- Pick a prompt-history session to continue capturing into.
+--- Writes the selected session ID to .prompt-history/active-session so the
+--- capture hook appends new prompts there instead of the Claude-assigned session.
+function M.prompt_history_list()
+  local cur = M.current_session()
+  local cwd = (cur and cur.cwd) or vim.fn.getcwd()
+  local ph = require('aiagent.prompthistory')
+  local sessions = ph.list_sessions(cwd)
+  if #sessions == 0 then
+    vim.notify("No prompt-history sessions found", vim.log.levels.INFO)
+    return
+  end
+
+  local active_id = ph.active_session(cwd)
+
+  local items = {}
+  table.insert(items, { label = "(default — use Claude's session ID)", id = nil })
+  for _, s in ipairs(sessions) do
+    local prompt = s.first_prompt:gsub("\n", " ")
+    if #prompt > 40 then prompt = prompt:sub(1, 37) .. "..." end
+    local marker = (active_id and s.id == active_id) and " *" or ""
+    table.insert(items, {
+      label = string.format("%d turns  %s  %s%s", s.turns, s.started, prompt, marker),
+      id = s.id,
+    })
+  end
+
+  vim.ui.select(items, {
+    prompt = "Select session to continue:",
+    format_item = function(item) return item.label end,
+  }, function(choice)
+    if not choice then return end
+    ph.set_active_session(cwd, choice.id)
+    if choice.id then
+      vim.notify("Prompt history will continue session: " .. choice.id, vim.log.levels.INFO)
+    else
+      vim.notify("Prompt history will use the default session", vim.log.levels.INFO)
+    end
+  end)
 end
 
 --- Close the prompt-history viewer and return to the chat terminal.

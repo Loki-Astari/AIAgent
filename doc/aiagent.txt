@@ -294,6 +294,7 @@ Terminal mode ~
   <C-\><C-a>    Cycle to the next agent
   <C-\><C-c>    Send open buffer context (see |:AgentSendContext|)
   <C-\><C-v>    Paste the unnamed register `"` into the terminal input
+  <C-\><C-d>    Open the prompt-history diff viewer (see |:AgentDiff|)
   <C-\><C-r>    Search input history (agent-specific)
 
 Scroll mode (normal mode inside terminal buffer) ~
@@ -758,8 +759,9 @@ VIEWER ~
 
 Run |:AgentDiff| to open the viewer in a new tabpage (the agent terminal is
 left untouched). The left column holds the prompt list and the changed-file
-list; the right pane shows the selected file's `before | after` content via
-native |:diffthis|. Keys inside the viewer:
+list; the right column shows the selected file's `before | after` diff via
+native |:diffthis| at the top and the full prompt text at the bottom. Keys
+inside the viewer:
 >
     j / k       Move through the prompt list (or file list when focused)
     ]f / [f     Cycle to the next / previous changed file

@@ -50,6 +50,12 @@ DIAG="$HIST_DIR/diagnostics.log"
 
 SESSION="$(field '.session_id')"
 [ -n "$SESSION" ] || { printf '%s no session_id (%s)\n' "$(date -u +%FT%TZ)" "$MODE" >>"$DIAG" 2>/dev/null; exit 0; }
+# Allow the user to override the session via a picker (AgentSessions).
+ACTIVE_FILE="$HIST_DIR/active-session"
+if [ -f "$ACTIVE_FILE" ]; then
+  OVERRIDE="$(cat "$ACTIVE_FILE" 2>/dev/null)"
+  [ -n "$OVERRIDE" ] && SESSION="$OVERRIDE"
+fi
 
 LOG="$SESS_DIR/$SESSION.jsonl"
 PENDING="$HIST_DIR/pending-$SESSION.json"
