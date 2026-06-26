@@ -19,6 +19,10 @@ vim.api.nvim_create_user_command("AgentCloseAll", function() require("aiagent").
 vim.api.nvim_create_user_command("AgentSendContext",   function() require("aiagent").send_context() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentResetContext",  function() require("aiagent").reset_context() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentSendSelection",    function() require("aiagent").send_selection() end, { range = true })
+vim.api.nvim_create_user_command("AgentDiff", function(o)
+  require("aiagent").prompt_history_open(o.args ~= "" and o.args or nil)
+end, { nargs = "?" })
+vim.api.nvim_create_user_command("AgentChat", function() require("aiagent").prompt_history_close() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentSendDiagnostics", function(o)
   local line1 = o.range > 0 and o.line1 or nil
   local line2 = o.range > 0 and o.line2 or nil

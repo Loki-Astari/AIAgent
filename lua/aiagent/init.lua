@@ -1813,6 +1813,43 @@ function M.send_diagnostics(agent_name, line1, line2)
   do_send()
 end
 
+--- The Claude session id + working dir for the current agent, resolved from
+--- its PID via ~/.claude/sessions/<pid>.json (same lookup the model statusline
+--- uses). Returns nil when no agent is running or the session can't be read.
+---@return { id: string, cwd: string }|nil
+function M.current_session()
+  local agent = M.current_agent and M.agents[M.current_agent]
+  if not agent or not agent.job_id then return nil end
+  local pid = vim.fn.jobpid(agent.job_id)
+  if not pid or pid == 0 then return nil end
+  local session = _read_json(vim.fn.expand('~/.claude/sessions/' .. pid .. '.json'))
+  if not session or not session.sessionId then return nil end
+  return { id = session.sessionId, cwd = session.cwd or vim.fn.getcwd() }
+end
+
+--- Open the prompt-history diff viewer for a session (default: the current
+--- agent's live session). The git object store is shared across worktrees, so
+--- the agent's cwd serves as both the git root and the .prompt-history anchor.
+---@param session string|nil Explicit session id (nil = resolve current agent)
+function M.prompt_history_open(session)
+  local cur = M.current_session()
+  local cwd = (cur and cur.cwd) or vim.fn.getcwd()
+  session = session or (cur and cur.id)
+  if not session then
+    vim.notify("AgentDiff: no active session; pass a session id (:AgentDiff <id>)",
+      vim.log.levels.ERROR)
+    return
+  end
+  local ph = require('aiagent.prompthistory')
+  if ph.state then ph.close() end  -- refresh: pick up newly captured prompts
+  ph.open_for(session, cwd, cwd)
+end
+
+--- Close the prompt-history viewer and return to the chat terminal.
+function M.prompt_history_close()
+  require('aiagent.prompthistory').close()
+end
+
 -- Expose internals needed for testing (prefixed with _ by convention)
 M._is_under = is_under
 
