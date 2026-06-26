@@ -103,7 +103,7 @@ require("aiagent").setup({
 | `:'<,'>AgentSendDiagnostics` | Send LSP diagnostics for the selected lines only |
 | `:AgentDiff [session]` | Open the prompt-history diff viewer (defaults to the current session; pass a session id to view an older one) |
 | `:AgentChat` | Close the prompt-history viewer and return to the agent chat |
-| `:AgentInstallSkill[!]` | Install the bundled `prompt-history` Claude skill into `~/.claude/skills/` (`!` overwrites an existing install) |
+| `:AgentInstallSkill[!]` | Install the bundled `prompt-history` Claude skill into `~/.claude/skills/` and offer to wire the capture hooks (`!` overwrites an existing skill install) |
 
 ### Supported agents
 
@@ -511,10 +511,16 @@ neovim. Install it with:
 ```
 
 This copies the skill into `~/.claude/skills/prompt-history/`, filling in this
-install's hook paths so the references resolve. Re-run with `:AgentInstallSkill!`
-to overwrite an existing copy. The capture hooks still need wiring separately
-(see [Capture setup](#capture-setup)); the installed skill's `reference/install.md`
-documents it with your paths already substituted in.
+install's hook paths so the references resolve. It then **offers to wire the
+capture hooks** into `~/.claude/settings.json` for you (answer the prompt) —
+without those hooks there is nothing to capture. The wiring is idempotent and
+non-destructive: it merges only the two `prompt_snapshot.sh` entries via `jq`,
+leaving the rest of your settings untouched, and writes a `.bak` first. Restart
+Claude Code afterwards so it picks up the new hooks. Re-run with
+`:AgentInstallSkill!` to overwrite an existing skill copy.
+
+If you decline the prompt, the installed skill's `reference/install.md`
+documents the manual wiring with your paths already substituted in.
 
 ## Health Check
 

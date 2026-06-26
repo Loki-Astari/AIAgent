@@ -277,8 +277,11 @@ known_agents ~
 :AgentInstallSkill[!]
   Install the bundled `prompt-history` Claude skill into
   `~/.claude/skills/prompt-history/`, substituting this install's hook
-  paths. Refuses to overwrite an existing install unless called with `!`.
-  See |aiagent-prompt-history| and |aiagent.install_skill()|.
+  paths, then prompt to wire the capture hooks into
+  `~/.claude/settings.json` (required for capture). Refuses to overwrite an
+  existing skill install unless called with `!`. See
+  |aiagent-prompt-history|, |aiagent.install_skill()|,
+  |aiagent.install_hooks()|.
 
 ==============================================================================
 6. KEYMAPS                                                 *aiagent-keymaps*
@@ -464,10 +467,29 @@ install_skill({opts})
   {opts.dest}   string|nil   Target directory (default
                              `~/.claude/skills/prompt-history`)
 
+  {opts.hooks}  boolean|nil  Wire capture hooks afterwards: true = wire
+                             silently, false = skip, nil = prompt (default)
+  {opts.settings} string|nil Settings path passed through to
+                             |aiagent.install_hooks()|
+
   Returns `true` when files were written, `false` when skipped (e.g. the
   destination exists and {force} is not set). The placeholder
   `__AIAGENT_HOOKS_DIR__` in the bundled skill is replaced with this
   install's hooks directory. See |aiagent-prompt-history|.
+
+                                            *aiagent.install_hooks()*
+install_hooks({opts})
+  Wire the `prompt_snapshot.sh` capture hooks (`UserPromptSubmit` and
+  `Stop`) into the user's Claude Code settings.
+
+  {opts.settings}  string|nil  Settings file (default `~/.claude/settings.json`)
+
+  The merge is performed with `jq`, so unrelated settings and the JSON
+  `[]`/`{}` distinction are preserved; a `.bak` of the original is written
+  first. Idempotent: an event already referencing `prompt_snapshot.sh` is
+  left untouched. Returns `(changes, wrote)` where `changes` is a list of
+  per-event outcome strings and `wrote` is whether the file was modified.
+  Requires `jq` on PATH.
 
 ==============================================================================
 8. GIT WORKTREES                                          *aiagent-worktrees*
@@ -758,7 +780,8 @@ CLAUDE SKILL ~
 The plugin bundles a `prompt-history` Claude skill that lets an agent drive the
 viewer for you. Install it with |:AgentInstallSkill|; it is copied into
 `~/.claude/skills/prompt-history/` with this install's hook paths substituted
-in. The capture hooks above must still be wired up separately.
+in, and you are then prompted to wire the capture hooks above into
+`~/.claude/settings.json` automatically (idempotent; a `.bak` is written).
 
 See also |:AgentDiff|, |:AgentChat|, |:AgentInstallSkill|,
 |aiagent.prompt_history_open()|, |aiagent.install_skill()|.

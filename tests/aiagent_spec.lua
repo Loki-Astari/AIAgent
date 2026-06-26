@@ -142,7 +142,8 @@ describe("aiagent.install_skill", function()
   end)
 
   it("copies the bundled skill and substitutes the real hooks path", function()
-    assert.is_true(aiagent.install_skill({ dest = dest }))
+    -- hooks = false: skip the (interactive) settings.json wiring.
+    assert.is_true(aiagent.install_skill({ dest = dest, hooks = false }))
 
     -- Files land at the destination, preserving the reference/ subdirectory.
     assert.equals(1, vim.fn.filereadable(dest .. "/SKILL.md"))
@@ -156,18 +157,61 @@ describe("aiagent.install_skill", function()
   end)
 
   it("refuses to overwrite an existing install unless forced", function()
-    assert.is_true(aiagent.install_skill({ dest = dest }))
+    assert.is_true(aiagent.install_skill({ dest = dest, hooks = false }))
 
     local level
     local orig = vim.notify
     vim.notify = function(_, lvl) level = lvl end
-    local result = aiagent.install_skill({ dest = dest })
+    local result = aiagent.install_skill({ dest = dest, hooks = false })
     vim.notify = orig
 
     assert.is_false(result)
     assert.equals(vim.log.levels.WARN, level)
 
     -- force = true goes through.
-    assert.is_true(aiagent.install_skill({ dest = dest, force = true }))
+    assert.is_true(aiagent.install_skill({ dest = dest, force = true, hooks = false }))
+  end)
+end)
+
+describe("aiagent.install_hooks", function()
+  local settings
+
+  before_each(function()
+    settings = vim.fn.tempname() .. "/settings.json"
+    vim.fn.mkdir(vim.fn.fnamemodify(settings, ":h"), "p")
+  end)
+  after_each(function()
+    vim.fn.delete(vim.fn.fnamemodify(settings, ":h"), "rf")
+  end)
+
+  it("adds both capture hooks while preserving unrelated settings", function()
+    -- An empty array would become {} under a naive JSON round-trip — the jq
+    -- merge must keep it an array.
+    vim.fn.writefile(vim.split(vim.fn.json_encode({
+      permissions = { allow = {} },
+      hooks = { PreToolUse = { { hooks = { { type = "command", command = "/x/other.sh" } } } } },
+    }), "\n"), settings)
+
+    local changes, wrote = aiagent.install_hooks({ settings = settings })
+    assert.is_true(wrote)
+    assert.equals(2, #changes)
+
+    local result = vim.fn.json_decode(vim.fn.readfile(settings))
+    assert.equals("table", type(result.permissions.allow))
+    assert.equals(0, #result.permissions.allow)            -- still an empty array
+    assert.is_not_nil(result.hooks.PreToolUse)             -- unrelated hook kept
+    local cmd = result.hooks.UserPromptSubmit[1].hooks[1].command
+    assert.is_not_nil(cmd:find("prompt_snapshot.sh pre", 1, true))
+    -- A backup of the original was written.
+    assert.equals(1, vim.fn.filereadable(settings .. ".bak"))
+  end)
+
+  it("is idempotent — a second run wires nothing", function()
+    aiagent.install_hooks({ settings = settings })
+    local changes, wrote = aiagent.install_hooks({ settings = settings })
+    assert.is_false(wrote)
+    for _, c in ipairs(changes) do
+      assert.is_not_nil(c:find("already wired", 1, true))
+    end
   end)
 end)

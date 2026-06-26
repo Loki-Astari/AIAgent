@@ -1857,11 +1857,74 @@ local function plugin_root()
   return vim.fn.fnamemodify(src, ':p:h:h:h')       -- absolute, then up to root
 end
 
+--- Wire the prompt_snapshot.sh capture hooks into the user's Claude Code
+--- settings.json. Idempotent: an event already referencing prompt_snapshot.sh
+--- is left untouched. The merge is done with jq so unrelated settings (and the
+--- JSON `[]` vs `{}` distinction) are preserved; a `.bak` is written first.
+---@param opts { settings: string|nil }|nil
+---@return string[] changes Human-readable description of each event's outcome
+---@return boolean wrote   Whether settings.json was modified
+function M.install_hooks(opts)
+  opts = opts or {}
+  local path = vim.fn.expand(opts.settings or '~/.claude/settings.json')
+  if vim.fn.executable('jq') == 0 then
+    return { 'jq not found on PATH — wire hooks manually (see reference/install.md)' }, false
+  end
+
+  local existing = (_read_json(path) or {}).hooks or {}
+  local events = {
+    { event = 'UserPromptSubmit', cmd = plugin_root() .. '/hooks/prompt_snapshot.sh pre' },
+    { event = 'Stop',             cmd = plugin_root() .. '/hooks/prompt_snapshot.sh post' },
+  }
+
+  local changes, to_add = {}, {}
+  for _, e in ipairs(events) do
+    local present = false
+    for _, group in ipairs(existing[e.event] or {}) do
+      for _, h in ipairs(group.hooks or {}) do
+        if type(h.command) == 'string' and h.command:find('prompt_snapshot.sh', 1, true) then
+          present = true
+        end
+      end
+    end
+    if present then
+      table.insert(changes, e.event .. ': already wired')
+    else
+      table.insert(to_add, e)
+      table.insert(changes, e.event .. ': added ' .. e.cmd)
+    end
+  end
+  if #to_add == 0 then return changes, false end
+
+  -- Back up an existing file; seed an empty object when there is none.
+  if vim.fn.filereadable(path) == 1 then
+    vim.fn.writefile(vim.fn.readfile(path), path .. '.bak')
+  else
+    vim.fn.mkdir(vim.fn.fnamemodify(path, ':h'), 'p')
+    vim.fn.writefile({ '{}' }, path)
+  end
+
+  local filter = '.hooks //= {} | .hooks[$event] //= [] '
+    .. '| .hooks[$event] += [{hooks:[{type:"command",command:$cmd}]}]'
+  for _, e in ipairs(to_add) do
+    local out = vim.fn.system({ 'jq', '--arg', 'event', e.event, '--arg', 'cmd', e.cmd, filter, path })
+    if vim.v.shell_error ~= 0 then
+      vim.notify('AIAgent: jq failed updating ' .. path .. ':\n' .. out, vim.log.levels.ERROR)
+      return changes, false
+    end
+    vim.fn.writefile(vim.split(out, '\n', { trimempty = true }), path)
+  end
+  return changes, true
+end
+
 --- Install the bundled prompt-history skill into the user's Claude skills
 --- directory. Copies the skill files, substituting the placeholder
 --- `__AIAGENT_HOOKS_DIR__` with this install's actual hooks path so the
---- inspect-script and hook-setup references resolve correctly.
----@param opts { force: boolean|nil, dest: string|nil }|nil
+--- inspect-script and hook-setup references resolve correctly. Then offers to
+--- wire the capture hooks (see |aiagent.install_hooks()|), without which there
+--- is nothing for the skill to show.
+---@param opts { force: boolean|nil, dest: string|nil, hooks: boolean|nil, settings: string|nil }|nil
+---  hooks: true = wire without asking, false = skip, nil = prompt (default)
 ---@return boolean installed
 function M.install_skill(opts)
   opts = opts or {}
@@ -1893,9 +1956,27 @@ function M.install_skill(opts)
     end
   end
 
-  vim.notify(('AIAgent: installed prompt-history skill (%d files) to %s\n'
-    .. 'Capture hooks still need wiring — see reference/install.md in the skill.')
-    :format(count, dest), vim.log.levels.INFO)
+  local report = { ('installed prompt-history skill (%d files) to %s'):format(count, dest) }
+
+  local wire = opts.hooks
+  if wire == nil then
+    wire = vim.fn.confirm(
+      'Wire the prompt_snapshot.sh capture hooks into ~/.claude/settings.json now?\n'
+      .. 'Required for capture; a .bak backup is written first.',
+      '&Yes\n&No', 1) == 1
+  end
+
+  if wire then
+    local changes, wrote = M.install_hooks({ settings = opts.settings })
+    for _, c in ipairs(changes) do table.insert(report, '  hook ' .. c) end
+    if wrote then
+      table.insert(report, '  settings.json updated (backup at .bak); restart Claude Code to load the hooks')
+    end
+  else
+    table.insert(report, '  capture hooks NOT wired — see reference/install.md in the skill to do it by hand')
+  end
+
+  vim.notify('AIAgent: ' .. table.concat(report, '\n'), vim.log.levels.INFO)
   return true
 end
 

@@ -219,9 +219,24 @@ copies it into `~/.claude/skills/prompt-history/`:
   inspect-script and hook-setup snippets are copy-pasteable for the target user.
   **When editing the bundled skill, never hard-code an absolute hooks path — use
   the placeholder.**
-- Refuses to overwrite an existing install unless `force` (the command's `!`).
-  Capture hooks are NOT auto-wired (that would edit the user's `settings.json`);
-  the notify and the copied `reference/install.md` point the user at the setup.
+- Refuses to overwrite an existing skill install unless `force` (the command's
+  `!`).
+- After copying, offers to wire the capture hooks via `M.install_hooks`
+  (`opts.hooks`: `nil` = prompt with `vim.fn.confirm`, `true` = wire silently,
+  `false` = skip — tests/headless pass `false`).
+
+`M.install_hooks({ settings })` merges the `UserPromptSubmit`/`Stop` entries
+into `~/.claude/settings.json`:
+
+- **Uses `jq`, not a Lua JSON round-trip.** Re-encoding the whole file through
+  `vim.fn.json_decode`/`json_encode` would coerce any empty `[]` (e.g.
+  `permissions.allow`) into `{}` and corrupt unrelated settings — jq preserves
+  the rest of the file and the `[]`/`{}` distinction. Writes a `.bak` first.
+- **Idempotent.** An event whose hooks already reference `prompt_snapshot.sh` is
+  left untouched; only missing entries are appended. Returns `(changes, wrote)`.
+- Does not auto-detect jq absence fatally — if `jq` isn't on PATH it returns a
+  change note telling the user to wire manually, rather than failing the skill
+  copy.
 
 ## GitHub MCP Setup
 
