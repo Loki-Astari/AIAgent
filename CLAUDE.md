@@ -41,9 +41,13 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 
 ## Architecture
 
-- `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, `:AgentSendDiagnostics`, etc.)
+- `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, `:AgentSendDiagnostics`, `:AgentDiff`, `:AgentChat`, etc.)
 - `lua/aiagent/init.lua` - Main Lua module with all plugin logic
+- `lua/aiagent/prompthistory.lua` - Prompt-history diff viewer (see [Prompt History](#prompt-history))
 - `lua/aiagent/health.lua` - Health check implementation (`:checkhealth aiagent`)
+- `hooks/prompt_snapshot.sh` - Claude Code `pre`/`post` hooks that capture per-prompt git tree snapshots
+- `hooks/prompt_history_inspect.sh` - Terminal tool to list/dump captured sessions
+- `skills/prompt-history/` - Bundled Claude skill, installed into `~/.claude/skills/` by `:AgentInstallSkill`
 - `doc/aiagent.txt` - Vimdoc help file (`:help aiagent`)
 
 The plugin manages state via module-level variables (`M.agents`, `M.current_agent`, `M.win`, `M.header_buf`, `M.header_win`, `M.prev_win`) and uses autocmds for cleanup on QuitPre/VimLeavePre.
@@ -153,6 +157,72 @@ Press `<C-\><C-s>` in terminal mode to enter scroll mode (normal mode in the ter
 
 The `scroll_pos` is stored as `{ pos[1], pos[2] }` (an explicit copy), not a reference, to avoid Lua table aliasing bugs with `nvim_win_get_cursor`.
 
+## Prompt History
+
+Captures the code changes produced by each prompt of an agent session and
+displays them in a side-by-side diff viewer.
+
+### Capture (`hooks/prompt_snapshot.sh`)
+
+A Claude Code hook wired into user `~/.claude/settings.json`:
+`UserPromptSubmit → prompt_snapshot.sh pre`, `Stop → prompt_snapshot.sh post`.
+
+- Records a turn as a pair of git tree SHAs. Trees are built in a **temp index**
+  (`read-tree HEAD` + `add -A` excluding `.prompt-history` + `write-tree`), so
+  they capture committed + uncommitted + untracked files uniformly, survive
+  commits, and never record the history dir itself.
+- One JSONL file per session at
+  `<repo>/.prompt-history/sessions/<session_id>.jsonl`, anchored on the git
+  **common** dir (`git rev-parse --path-format=absolute --git-common-dir`) so all
+  worktrees of a repo share one location. Pending turn held in
+  `pending-<session>.json`, closed on the next `pre` if interrupted.
+- Each record: `session, started, ended, prompt, before_tree, after_tree,
+  changed_files, cwd, head, branch`. Zero-change turns are still recorded.
+- The hook writes no stdout (it would pollute the prompt context) and always
+  exits 0, so capture failures never block a turn.
+
+### Viewer (`lua/aiagent/prompthistory.lua`)
+
+- Opens in a **new tabpage**, leaving the agent terminal in `M.win` untouched.
+  Layout: left column (instructions / prompt list / changed-files), right pane
+  `before | after` via native `:diffthis`.
+- Reconstructs file content with `git show <tree>:<path>` — **never** `git diff`
+  for content (a user's external difftool may hijack plain `git diff`; only
+  `--no-ext-diff` / `--name-status` / `git show` are safe). `changed_files()`
+  parses `git diff --no-ext-diff --name-status -M`.
+- `M.state` is `nil` when closed. Opening with no completed turns yet leaves it
+  `nil` (nothing to show) — that is expected, not a failure.
+
+### Entry points (`lua/aiagent/init.lua`)
+
+- `current_session()` — resolves the running agent's PID →
+  `~/.claude/sessions/<pid>.json` → `{ id, cwd }`.
+- `prompt_history_open(session?)` — opens the viewer (default: current session);
+  closes any open viewer first to refresh with newly captured prompts.
+- `prompt_history_close()` — closes the viewer, back to chat.
+
+Commands `:AgentDiff [session]` / `:AgentChat` are registered in
+`plugin/aiagent.lua`. They can also be driven remotely (e.g. from an agent) via
+`nvim --server "$NVIM" --remote-expr "luaeval(\"require('aiagent').prompt_history_open()\")"`.
+
+### Bundled skill (`skills/prompt-history/`, `:AgentInstallSkill`)
+
+A `prompt-history` Claude skill ships in `skills/` so it can be distributed with
+the plugin. `M.install_skill({ force, dest })` (command `:AgentInstallSkill[!]`)
+copies it into `~/.claude/skills/prompt-history/`:
+
+- The plugin root is resolved from the file's own path via
+  `debug.getinfo(1, 'S').source` → `:p:h:h:h` (absolute, then up out of
+  `lua/aiagent/`). Exposed for tests as `M._plugin_root`.
+- The bundled skill uses a `__AIAGENT_HOOKS_DIR__` placeholder for any hook-path
+  reference; the installer substitutes this install's real `<root>/hooks` so the
+  inspect-script and hook-setup snippets are copy-pasteable for the target user.
+  **When editing the bundled skill, never hard-code an absolute hooks path — use
+  the placeholder.**
+- Refuses to overwrite an existing install unless `force` (the command's `!`).
+  Capture hooks are NOT auto-wired (that would edit the user's `settings.json`);
+  the notify and the copied `reference/install.md` point the user at the setup.
+
 ## GitHub MCP Setup
 
 ### Overview
@@ -194,5 +264,3 @@ Select `github` and complete the browser OAuth flow.
 - `https://api.githubcopilot.com/mcp/` (correct)
 - The GitHub OAuth App callback URL must exactly match the port mcp-remote uses — always use `--port 3334` to keep it stable
 - Claude.ai's GitHub connector (at claude.ai/settings/connectors) is a **separate system** from Claude Code's MCP config and they do not share state
-
-│         d

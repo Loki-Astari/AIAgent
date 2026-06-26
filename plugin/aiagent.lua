@@ -23,6 +23,9 @@ vim.api.nvim_create_user_command("AgentDiff", function(o)
   require("aiagent").prompt_history_open(o.args ~= "" and o.args or nil)
 end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentChat", function() require("aiagent").prompt_history_close() end, { nargs = 0 })
+vim.api.nvim_create_user_command("AgentInstallSkill", function(o)
+  require("aiagent").install_skill({ force = o.bang })
+end, { nargs = 0, bang = true })
 vim.api.nvim_create_user_command("AgentSendDiagnostics", function(o)
   local line1 = o.range > 0 and o.line1 or nil
   local line2 = o.range > 0 and o.line2 or nil

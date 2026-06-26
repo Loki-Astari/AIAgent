@@ -130,3 +130,44 @@ describe("aiagent state", function()
     assert.equals(0, aiagent.pending_context_count())
   end)
 end)
+
+describe("aiagent.install_skill", function()
+  local dest
+
+  before_each(function()
+    dest = vim.fn.tempname() .. "/skills/prompt-history"
+  end)
+  after_each(function()
+    vim.fn.delete(vim.fn.fnamemodify(dest, ":h:h"), "rf")
+  end)
+
+  it("copies the bundled skill and substitutes the real hooks path", function()
+    assert.is_true(aiagent.install_skill({ dest = dest }))
+
+    -- Files land at the destination, preserving the reference/ subdirectory.
+    assert.equals(1, vim.fn.filereadable(dest .. "/SKILL.md"))
+    assert.equals(1, vim.fn.filereadable(dest .. "/reference/install.md"))
+
+    -- The placeholder is gone, replaced by this install's absolute hooks dir.
+    local hooks = aiagent._plugin_root() .. "/hooks"
+    local skill = table.concat(vim.fn.readfile(dest .. "/SKILL.md"), "\n")
+    assert.is_nil(skill:find("__AIAGENT_HOOKS_DIR__", 1, true))
+    assert.is_not_nil(skill:find(hooks .. "/prompt_history_inspect.sh", 1, true))
+  end)
+
+  it("refuses to overwrite an existing install unless forced", function()
+    assert.is_true(aiagent.install_skill({ dest = dest }))
+
+    local level
+    local orig = vim.notify
+    vim.notify = function(_, lvl) level = lvl end
+    local result = aiagent.install_skill({ dest = dest })
+    vim.notify = orig
+
+    assert.is_false(result)
+    assert.equals(vim.log.levels.WARN, level)
+
+    -- force = true goes through.
+    assert.is_true(aiagent.install_skill({ dest = dest, force = true }))
+  end)
+end)

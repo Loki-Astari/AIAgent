@@ -19,7 +19,8 @@ CONTENTS                                                    *aiagent-contents*
  10. LSP Diagnostics ........... |aiagent-diagnostics|
  11. Bufferline Integration .... |aiagent-bufferline|
  12. Lualine Integration ........ |aiagent-lualine|
- 13. Health check .............. |aiagent-health|
+ 13. Prompt History ............ |aiagent-prompt-history|
+ 14. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -37,6 +38,7 @@ Neovim as a persistent terminal split. Features include:
   - Bufferline tab integration
   - Idle attention alerts when a background agent finishes or needs input
   - Lualine integration: agent mode, worktree branch, and MCP server status
+  - Prompt history: per-prompt before/after diff viewer
 
 ==============================================================================
 2. REQUIREMENTS                                         *aiagent-requirements*
@@ -261,6 +263,23 @@ known_agents ~
   Opens the agent if not already running.
   See also |aiagent.send_diagnostics()|.
 
+                                                              *:AgentDiff*
+:AgentDiff [session]
+  Open the prompt-history diff viewer. With no argument, opens the
+  current agent's session; pass a session id to view an older one.
+  Opens in a new tabpage. See |aiagent-prompt-history|.
+
+                                                              *:AgentChat*
+:AgentChat
+  Close the prompt-history viewer and return to the agent chat.
+
+                                                       *:AgentInstallSkill*
+:AgentInstallSkill[!]
+  Install the bundled `prompt-history` Claude skill into
+  `~/.claude/skills/prompt-history/`, substituting this install's hook
+  paths. Refuses to overwrite an existing install unless called with `!`.
+  See |aiagent-prompt-history| and |aiagent.install_skill()|.
+
 ==============================================================================
 6. KEYMAPS                                                 *aiagent-keymaps*
 
@@ -418,6 +437,37 @@ mcp_refresh()
   `claude mcp list` query. Use this after changing your Claude MCP
   configuration so the statusline updates without waiting for the
   30-second cache to expire.
+
+                                              *aiagent.current_session()*
+current_session()
+  Resolve the running agent's Claude Code session via its PID and
+  `~/.claude/sessions/<pid>.json`. Returns `{ id, cwd }`, or `nil` when
+  no agent is running or the session file can't be read.
+
+                                         *aiagent.prompt_history_open()*
+prompt_history_open({session})
+  Open the prompt-history viewer. {session} is an optional session id
+  (default: the current agent's session). Any open viewer is closed
+  first so newly captured prompts are picked up. Programmatic
+  equivalent of |:AgentDiff|. See |aiagent-prompt-history|.
+
+                                        *aiagent.prompt_history_close()*
+prompt_history_close()
+  Close the prompt-history viewer. Equivalent of |:AgentChat|.
+
+                                            *aiagent.install_skill()*
+install_skill({opts})
+  Copy the bundled `prompt-history` Claude skill into the user's Claude
+  skills directory. Programmatic equivalent of |:AgentInstallSkill|.
+
+  {opts.force}  boolean|nil  Overwrite an existing install (default false)
+  {opts.dest}   string|nil   Target directory (default
+                             `~/.claude/skills/prompt-history`)
+
+  Returns `true` when files were written, `false` when skipped (e.g. the
+  destination exists and {force} is not set). The placeholder
+  `__AIAGENT_HOOKS_DIR__` in the bundled skill is replaced with this
+  install's hooks directory. See |aiagent-prompt-history|.
 
 ==============================================================================
 8. GIT WORKTREES                                          *aiagent-worktrees*
@@ -659,7 +709,62 @@ Carousel scroll ~                               *aiagent-lualine-mcp-scroll*
 <
 
 ==============================================================================
-13. HEALTH CHECK                                           *aiagent-health*
+13. PROMPT HISTORY                                  *aiagent-prompt-history*
+
+Browse, prompt by prompt, the code an agent session changed. Each prompt is
+captured as a pair of git tree snapshots (before the turn and after the agent
+finishes); the viewer reconstructs a native side-by-side diff of the files that
+changed.
+
+CAPTURE ~
+
+Two Claude Code hooks (shipped in the plugin's `hooks/` directory) record the
+snapshots. Wire them into your user `~/.claude/settings.json`: >
+    UserPromptSubmit -> prompt_snapshot.sh pre   (tree at submit time)
+    Stop             -> prompt_snapshot.sh post  (tree after the turn)
+<
+Each turn is appended to `<repo>/.prompt-history/sessions/<id>.jsonl` with the
+prompt text, before/after tree SHAs, and changed files. The path is anchored on
+the git common dir, so all worktrees of a repo share one history. Trees are
+built in a temporary index (committed + uncommitted + untracked files, with
+`.prompt-history/` excluded), so they survive commits and capture
+work-in-progress. The hooks write no stdout and always exit 0, so a capture
+failure never blocks a turn. Requires `git` and `jq` on PATH; add
+`.prompt-history/` to your `.gitignore`.
+
+VIEWER ~
+
+Run |:AgentDiff| to open the viewer in a new tabpage (the agent terminal is
+left untouched). The left column holds the prompt list and the changed-file
+list; the right pane shows the selected file's `before | after` content via
+native |:diffthis|. Keys inside the viewer:
+>
+    j / k       Move through the prompt list (or file list when focused)
+    ]f / [f     Cycle to the next / previous changed file
+    q           Close the viewer and return to the agent chat
+<
+The current turn is only recorded once it finishes, so a session with no
+completed turns yet opens empty.
+
+INSPECT FROM THE TERMINAL ~
+
+`hooks/prompt_history_inspect.sh` lists and dumps history without the viewer: >
+    prompt_history_inspect.sh                    list sessions for this repo
+    prompt_history_inspect.sh <session-id>       dump a session's prompts
+    prompt_history_inspect.sh <session-id> <n>   changed files for prompt #n
+<
+CLAUDE SKILL ~
+
+The plugin bundles a `prompt-history` Claude skill that lets an agent drive the
+viewer for you. Install it with |:AgentInstallSkill|; it is copied into
+`~/.claude/skills/prompt-history/` with this install's hook paths substituted
+in. The capture hooks above must still be wired up separately.
+
+See also |:AgentDiff|, |:AgentChat|, |:AgentInstallSkill|,
+|aiagent.prompt_history_open()|, |aiagent.install_skill()|.
+
+==============================================================================
+14. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 

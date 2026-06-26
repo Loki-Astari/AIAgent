@@ -1850,7 +1850,57 @@ function M.prompt_history_close()
   require('aiagent.prompthistory').close()
 end
 
+--- Absolute path to this plugin's root directory (resolved from this file's
+--- own location: lua/aiagent/init.lua -> root).
+local function plugin_root()
+  local src = debug.getinfo(1, 'S').source:sub(2)  -- strip leading '@'
+  return vim.fn.fnamemodify(src, ':p:h:h:h')       -- absolute, then up to root
+end
+
+--- Install the bundled prompt-history skill into the user's Claude skills
+--- directory. Copies the skill files, substituting the placeholder
+--- `__AIAGENT_HOOKS_DIR__` with this install's actual hooks path so the
+--- inspect-script and hook-setup references resolve correctly.
+---@param opts { force: boolean|nil, dest: string|nil }|nil
+---@return boolean installed
+function M.install_skill(opts)
+  opts = opts or {}
+  local src = plugin_root() .. '/skills/prompt-history'
+  if vim.fn.isdirectory(src) == 0 then
+    vim.notify('AIAgent: bundled skill not found at ' .. src, vim.log.levels.ERROR)
+    return false
+  end
+
+  local dest = vim.fn.expand(opts.dest or '~/.claude/skills/prompt-history')
+  if vim.fn.isdirectory(dest) == 1 and not opts.force then
+    vim.notify('AIAgent: skill already installed at ' .. dest
+      .. ' — use :AgentInstallSkill! to overwrite', vim.log.levels.WARN)
+    return false
+  end
+
+  local hooks_dir = plugin_root() .. '/hooks'
+  local count = 0
+  for _, path in ipairs(vim.fn.globpath(src, '**/*', false, true)) do
+    if vim.fn.isdirectory(path) == 0 then  -- files only; mkdir creates the dirs
+      local out = dest .. '/' .. path:sub(#src + 2)  -- strip "src/"
+      vim.fn.mkdir(vim.fn.fnamemodify(out, ':h'), 'p')
+      local lines = vim.fn.readfile(path)
+      for i, line in ipairs(lines) do
+        lines[i] = line:gsub('__AIAGENT_HOOKS_DIR__', hooks_dir)
+      end
+      vim.fn.writefile(lines, out)
+      count = count + 1
+    end
+  end
+
+  vim.notify(('AIAgent: installed prompt-history skill (%d files) to %s\n'
+    .. 'Capture hooks still need wiring — see reference/install.md in the skill.')
+    :format(count, dest), vim.log.levels.INFO)
+  return true
+end
+
 -- Expose internals needed for testing (prefixed with _ by convention)
 M._is_under = is_under
+M._plugin_root = plugin_root
 
 return M

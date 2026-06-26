@@ -16,6 +16,7 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 - **Git worktree support** - Isolate each agent's work in its own branch and directory, with automatic reconnect across sessions
 - **Idle attention alerts** - When a background agent finishes or pauses for input, its tab is highlighted with a `●` indicator so you know to switch back
 - **Lualine integration** - Optional helpers for lualine.nvim: shows the active agent name and mode in section A, the worktree branch in section B, and connected MCP servers in section X
+- **Prompt history** - Capture the before/after code changes for every prompt of an agent session and browse them in a side-by-side diff viewer, so you can see exactly what each prompt produced
 
 ## Requirements
 
@@ -100,6 +101,9 @@ require("aiagent").setup({
 | `:'<,'>AgentSendSelection` | Send visual selection to the agent |
 | `:AgentSendDiagnostics` | Send LSP diagnostics for the current file to the agent |
 | `:'<,'>AgentSendDiagnostics` | Send LSP diagnostics for the selected lines only |
+| `:AgentDiff [session]` | Open the prompt-history diff viewer (defaults to the current session; pass a session id to view an older one) |
+| `:AgentChat` | Close the prompt-history viewer and return to the agent chat |
+| `:AgentInstallSkill[!]` | Install the bundled `prompt-history` Claude skill into `~/.claude/skills/` (`!` overwrites an existing install) |
 
 ### Supported agents
 
@@ -419,6 +423,98 @@ require('aiagent').setup({
   mcp_scroll    = true, -- set false to show full list without scrolling
 })
 ```
+
+## Prompt History
+
+Browse, prompt by prompt, exactly what code an agent session changed. Each
+prompt is captured as a pair of git tree snapshots (before the turn and after
+the agent finishes), and the viewer reconstructs a native side-by-side diff of
+the files that changed.
+
+### How it works
+
+1. Two Claude Code hooks record a snapshot per turn: `prompt_snapshot.sh pre`
+   on `UserPromptSubmit` (the tree at submit time) and `prompt_snapshot.sh post`
+   on `Stop` (the tree after the agent finishes). See [Capture setup](#capture-setup).
+2. Each turn is appended to `<repo>/.prompt-history/sessions/<session_id>.jsonl`
+   with the prompt text, before/after tree SHAs, and the list of changed files.
+   The location is anchored on the git **common** dir, so every worktree of a
+   repo shares one history.
+3. Run `:AgentDiff` to open the viewer for the current session (or
+   `:AgentDiff <session-id>` for an older one). It opens in its own tabpage and
+   leaves the agent terminal untouched.
+
+The snapshots are built in a temporary git index (committed + uncommitted +
+untracked files, with `.prompt-history/` itself excluded), so they survive
+commits and capture work-in-progress uniformly.
+
+### Viewer layout
+
+The viewer fills a new tabpage:
+
+- **Left column** — fixed instructions, the scrollable list of prompts, and the
+  list of files the selected prompt changed
+- **Right pane** — the selected file's `before | after` content as a native
+  `:diffthis` split
+
+| Key | Description |
+|-----|-------------|
+| `j` / `k` | Move through the prompt list (or the file list when focused there) |
+| `]f` / `[f` | Cycle to the next / previous changed file |
+| `q` | Close the viewer and return to the agent chat |
+
+The current turn is only recorded once it finishes, so a brand-new session with
+no completed turns yet opens empty.
+
+### Capture setup
+
+The viewer is fed by hooks that ship in the plugin's `hooks/` directory. Wire
+them into your **user** `~/.claude/settings.json` so they capture across every
+repo:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command",
+        "command": "/path/to/AIAgent/hooks/prompt_snapshot.sh pre" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command",
+        "command": "/path/to/AIAgent/hooks/prompt_snapshot.sh post" } ] }
+    ]
+  }
+}
+```
+
+The hooks write no stdout (which would pollute the prompt) and always exit 0, so
+a capture failure never blocks a turn. Add `.prompt-history/` to your
+`.gitignore` to keep snapshots out of commits. `git` and `jq` must be on `PATH`.
+
+To inspect history from the terminal without the viewer:
+
+```sh
+hooks/prompt_history_inspect.sh                 # list sessions for this repo
+hooks/prompt_history_inspect.sh <session-id>    # dump a session's prompts
+hooks/prompt_history_inspect.sh <session-id> <n>  # changed files for prompt #n
+```
+
+### Claude skill
+
+The plugin bundles a `prompt-history` [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
+(under `skills/` in this repo) that lets an agent drive the viewer for you —
+list sessions, open the current or an older one, and close it — by remote-calling
+neovim. Install it with:
+
+```vim
+:AgentInstallSkill
+```
+
+This copies the skill into `~/.claude/skills/prompt-history/`, filling in this
+install's hook paths so the references resolve. Re-run with `:AgentInstallSkill!`
+to overwrite an existing copy. The capture hooks still need wiring separately
+(see [Capture setup](#capture-setup)); the installed skill's `reference/install.md`
+documents it with your paths already substituted in.
 
 ## Health Check
 
