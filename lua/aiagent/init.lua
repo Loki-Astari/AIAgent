@@ -1853,10 +1853,61 @@ function M.prompt_history_open(session)
   ph.open_for(session, cwd, cwd)
 end
 
---- Pick a prompt-history session to continue capturing into.
---- Writes the selected session ID to .prompt-history/active-session so the
---- capture hook appends new prompts there instead of the Claude-assigned session.
-function M.prompt_history_list()
+--- Build a primer from a session's prompt history (prompts + changed files +
+--- diffs) and TYPE it into the running agent's prompt without submitting, so the
+--- user can review and press Enter. This re-orients the agent on a previous
+--- session's intent; it is not a conversation replay (assistant turns are not
+--- captured), which is why it is deliberately not called "resume".
+---@param session string  prompt-history session id to load
+---@param agent_name string|nil  defaults to the current/AIAgent agent
+function M.prompt_history_load_context(session, agent_name)
+  local ph = require('aiagent.prompthistory')
+  local cur = M.current_session()
+  local cwd = (cur and cur.cwd) or vim.fn.getcwd()
+  local text, err = ph.build_primer(session, cwd)
+  if not text then
+    vim.notify("AgentSessions: " .. (err or "could not build primer"), vim.log.levels.ERROR)
+    return
+  end
+
+  local name = agent_name or M.current_agent or "AIAgent"
+
+  local function do_send()
+    local agent = M.agents[name]
+    if not agent or not agent.job_id then
+      vim.notify("Agent '" .. name .. "' not running", vim.log.levels.ERROR)
+      return
+    end
+    -- ESC normalises any vim mode (no-op if already normal), then 'i' enters insert.
+    send_to_terminal(name, "\x1bi")
+    send_to_terminal(name, text)
+    M.current_agent = name
+    if M.win then
+      vim.api.nvim_win_set_buf(M.win, agent.buf)
+      vim.api.nvim_set_current_win(M.win)
+    end
+    update_header()
+    vim.cmd("startinsert")
+  end
+
+  if not M.agents[name] then
+    M.open(name)
+    vim.defer_fn(do_send, 100)
+    return
+  end
+  if not M.is_open() then
+    M.open(name)
+  end
+  do_send()
+end
+
+--- Pick a prompt-history session. By default this selects the session to
+--- continue capturing into (writes .prompt-history/active-session so the capture
+--- hook appends new prompts there). With load_context=true (the `:AgentSessions!`
+--- bang) the chosen session's prompt history is instead loaded into the running
+--- agent's context via M.prompt_history_load_context.
+---@param load_context boolean|nil
+function M.prompt_history_list(load_context)
   local cur = M.current_session()
   local cwd = (cur and cur.cwd) or vim.fn.getcwd()
   local ph = require('aiagent.prompthistory')
@@ -1869,7 +1920,11 @@ function M.prompt_history_list()
   local active_id = ph.active_session(cwd)
 
   local items = {}
-  table.insert(items, { label = "(default — use Claude's session ID)", id = nil })
+  -- The "default" pseudo-entry only makes sense for capture selection; loading
+  -- context requires a concrete session, so omit it in that mode.
+  if not load_context then
+    table.insert(items, { label = "(default — use Claude's session ID)", id = nil })
+  end
   for _, s in ipairs(sessions) do
     local prompt = s.first_prompt:gsub("\n", " ")
     if #prompt > 40 then prompt = prompt:sub(1, 37) .. "..." end
@@ -1881,15 +1936,26 @@ function M.prompt_history_list()
   end
 
   vim.ui.select(items, {
-    prompt = "Select session to continue:",
+    prompt = load_context and "Select session to load into agent context:"
+      or "Select session to continue:",
     format_item = function(item) return item.label end,
   }, function(choice)
     if not choice then return end
+    if load_context then
+      M.prompt_history_load_context(choice.id)
+      return
+    end
     ph.set_active_session(cwd, choice.id)
     if choice.id then
       vim.notify("Prompt history will continue session: " .. choice.id, vim.log.levels.INFO)
     else
       vim.notify("Prompt history will use the default session", vim.log.levels.INFO)
+    end
+    -- If the diff viewer is open, follow the selection so it shows the chosen
+    -- session. "Default" resolves to the live Claude session, matching open.
+    if ph.state then
+      local target = choice.id or (cur and cur.id)
+      if target then ph.reload(target) end
     end
   end)
 end

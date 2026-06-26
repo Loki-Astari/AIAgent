@@ -23,7 +23,11 @@ vim.api.nvim_create_user_command("AgentDiff", function(o)
   require("aiagent").prompt_history_open(o.args ~= "" and o.args or nil)
 end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentChat", function() require("aiagent").prompt_history_close() end, { nargs = 0 })
-vim.api.nvim_create_user_command("AgentSessions", function() require("aiagent").prompt_history_list() end, { nargs = 0 })
+vim.api.nvim_create_user_command("AgentSessions", function(o)
+  -- Plain `:AgentSessions` picks the session to continue capturing into;
+  -- `:AgentSessions!` loads the chosen session's prompt history into the agent.
+  require("aiagent").prompt_history_list(o.bang)
+end, { nargs = 0, bang = true })
 vim.api.nvim_create_user_command("AgentInstallSkill", function(o)
   require("aiagent").install_skill({ force = o.bang })
 end, { nargs = 0, bang = true })

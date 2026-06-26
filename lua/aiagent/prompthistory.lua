@@ -22,6 +22,12 @@ local M = {}
 
 M.state = nil  -- nil when closed; a table while the viewer tab is open
 
+-- Sentinel embedded as the first line of a primer built by M.build_primer. When
+-- the user submits the primer, hooks/prompt_snapshot.sh sees this token in the
+-- prompt and skips recording the turn (we are replaying history, not making it).
+-- KEEP IN SYNC with PRIMER_MARKER in hooks/prompt_snapshot.sh.
+M.PRIMER_MARKER = "<!-- AIAGENT_PROMPT_HISTORY_PRIMER: loaded from history; do not re-record -->"
+
 -- ---------------------------------------------------------------------------
 -- Data access
 -- ---------------------------------------------------------------------------
@@ -154,6 +160,82 @@ local function changed_files(root, before, after)
     end
   end
   return files
+end
+
+--- Unified diff for one turn, between its before/after trees. Uses
+--- --no-ext-diff so a user's external difftool cannot hijack the output (the
+--- same safety rule as content reconstruction elsewhere in this module).
+---@param root string  git root holding the shared object store
+---@param before string|nil
+---@param after string|nil
+---@return string[]
+local function turn_diff(root, before, after)
+  if not before or not after then return {} end
+  local out = vim.fn.systemlist(
+    { "git", "-C", root, "diff", "--no-ext-diff", "-M", before, after })
+  if vim.v.shell_error ~= 0 then return {} end
+  return out
+end
+
+--- Build a context primer for a session: its prompts (USER-side only), each
+--- annotated with the files it changed and the unified diff it produced. Meant
+--- to be typed into a running agent to re-orient it on prior intent. It is NOT
+--- a conversation replay — assistant replies, reasoning, and tool calls are not
+--- captured — which is why this is deliberately not called "resume".
+---@param session string
+---@param dir string  any path inside the repo (resolves the shared history dir)
+---@return string|nil text, string|nil err
+function M.build_primer(session, dir)
+  local hist_dir, main_root = history_dir(dir or vim.fn.getcwd())
+  if not hist_dir or not main_root then return nil, "not in a git repo" end
+  local recs = read_session(hist_dir, session)
+  if #recs == 0 then return nil, "no records for session " .. session end
+
+  local parts = {}
+  -- Sentinel: this prompt is rebuilt FROM the capture log, so the capture hook
+  -- (prompt_snapshot.sh) must NOT record it again. The hook greps the submitted
+  -- prompt text for this exact token — keep the two in sync.
+  table.insert(parts, M.PRIMER_MARKER)
+  table.insert(parts, "# Context from a previous session")
+  table.insert(parts, "")
+  table.insert(parts, string.format(
+    "Below are the %d prompts from a previous prompt-history session (%s), in order. "
+    .. "These are the USER's prompts only — the assistant's replies, reasoning, and "
+    .. "tool calls were not captured, so this is a re-orientation aid, not a "
+    .. "conversation replay. Each prompt is annotated with the files it changed and "
+    .. "the diff it produced. Use it to understand what was being worked on and why; "
+    .. "the files currently on disk remain the source of truth.",
+    #recs, session))
+  table.insert(parts, "")
+
+  for i, rec in ipairs(recs) do
+    local prompt = (rec.prompt or ""):gsub("%s+$", "")
+    table.insert(parts, string.format("## Turn %d", i))
+    table.insert(parts, "")
+    table.insert(parts, "Prompt:")
+    table.insert(parts, prompt ~= "" and prompt or "(empty)")
+    table.insert(parts, "")
+
+    local files = changed_files(main_root, rec.before_tree, rec.after_tree)
+    if #files == 0 then
+      table.insert(parts, "Changed files: (none)")
+    else
+      table.insert(parts, "Changed files:")
+      for _, fl in ipairs(files) do
+        table.insert(parts, string.format("  %s  %s", fl.status, fl.path))
+      end
+      local diff = turn_diff(main_root, rec.before_tree, rec.after_tree)
+      if #diff > 0 then
+        table.insert(parts, "")
+        table.insert(parts, "```diff")
+        for _, l in ipairs(diff) do table.insert(parts, l) end
+        table.insert(parts, "```")
+      end
+    end
+    table.insert(parts, "")
+  end
+
+  return table.concat(parts, "\n"), nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -466,6 +548,31 @@ function M.open_for(session, git_root, dir)
   render_list()
   load_prompt(#records)
   vim.api.nvim_set_current_win(wins.list)
+end
+
+--- Switch the open viewer to a different session, reusing its windows so the
+--- user's focus and tab are preserved. No-op (returns false) when the viewer is
+--- closed or already showing this session; warns and keeps the current view
+--- when the new session has no records.
+---@param session string
+---@return boolean switched
+function M.reload(session)
+  local s = M.state
+  if not s or session == s.session then return false end
+  local hist_dir = history_dir(s.git_root)
+  local records = hist_dir and read_session(hist_dir, session) or {}
+  if #records == 0 then
+    vim.notify("prompt-history: no records for session " .. session, vim.log.levels.WARN)
+    return false
+  end
+  s.session = session
+  s.records = records
+  s.idx = #records
+  s.file_idx = 1
+  s.files = {}
+  render_list()
+  load_prompt(#records)
+  return true
 end
 
 --- Close the viewer tab and return to the chat window.

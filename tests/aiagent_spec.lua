@@ -215,3 +215,70 @@ describe("aiagent.install_hooks", function()
     end
   end)
 end)
+
+describe("prompthistory.build_primer", function()
+  local ph = require("aiagent.prompthistory")
+  local repo
+
+  -- Run a git command in the temp repo and return trimmed stdout.
+  local function git(...)
+    local args = { "git", "-C", repo }
+    for _, a in ipairs({ ... }) do table.insert(args, a) end
+    local out = vim.fn.system(args)
+    return (out:gsub("%s+$", ""))
+  end
+
+  before_each(function()
+    repo = vim.fn.tempname()
+    vim.fn.mkdir(repo, "p")
+    git("init", "-q")
+    git("config", "user.email", "t@t.t")
+    git("config", "user.name", "t")
+  end)
+  after_each(function()
+    vim.fn.delete(repo, "rf")
+  end)
+
+  -- Snapshot the working tree into the object store the way the capture hook
+  -- does, returning the resulting tree SHA.
+  local function write_tree()
+    git("add", "-A")
+    return git("write-tree")
+  end
+
+  it("renders prompts, changed files, and diffs from a session log", function()
+    vim.fn.writefile({ "one" }, repo .. "/a.txt")
+    local before = write_tree()
+    vim.fn.writefile({ "two" }, repo .. "/a.txt")
+    vim.fn.writefile({ "new" }, repo .. "/b.txt")
+    local after = write_tree()
+
+    local hist = repo .. "/.prompt-history/sessions"
+    vim.fn.mkdir(hist, "p")
+    local rec = {
+      session = "sess1", started = "2026-06-26", ended = "2026-06-26",
+      prompt = "change a and add b", before_tree = before, after_tree = after,
+      changed_files = 2,
+    }
+    vim.fn.writefile({ vim.fn.json_encode(rec) }, hist .. "/sess1.jsonl")
+
+    local text, err = ph.build_primer("sess1", repo)
+    assert.is_nil(err)
+    assert.is_not_nil(text)
+    assert.is_not_nil(text:find("change a and add b", 1, true))   -- the prompt
+    assert.is_not_nil(text:find("M  a.txt", 1, true))             -- modified file
+    assert.is_not_nil(text:find("A  b.txt", 1, true))             -- added file
+    assert.is_not_nil(text:find("```diff", 1, true))              -- diff fence
+    assert.is_not_nil(text:find("+two", 1, true))                 -- diff content
+    assert.is_not_nil(text:find("USER's prompts only", 1, true))  -- the caveat
+    -- The capture-skip sentinel must be the very first line so the hook can
+    -- recognise the primer and not re-record it.
+    assert.equals(ph.PRIMER_MARKER, text:match("^[^\n]*"))
+  end)
+
+  it("returns an error for an unknown session", function()
+    local text, err = ph.build_primer("nope", repo)
+    assert.is_nil(text)
+    assert.is_not_nil(err)
+  end)
+end)

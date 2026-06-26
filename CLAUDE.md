@@ -200,9 +200,21 @@ A Claude Code hook wired into user `~/.claude/settings.json`:
 - `prompt_history_open(session?)` — opens the viewer (default: current session);
   closes any open viewer first to refresh with newly captured prompts.
 - `prompt_history_close()` — closes the viewer, back to chat.
+- `prompt_history_list(load_context?)` — `vim.ui.select` session picker. Default:
+  pick the session to continue capturing into (sets `active-session`). With
+  `load_context` true (the `:AgentSessions!` bang): pick a session to load into
+  the agent's context instead.
+- `prompt_history_load_context(session, agent_name?)` — builds a primer for a
+  session (`prompthistory.build_primer`: prompts + per-turn changed files +
+  diffs) and **types it into the agent without submitting** (same `\x1bi`
+  type-don't-submit path as `send_diagnostics`), so the user reviews and presses
+  Enter. A re-orientation aid, not a conversation replay — deliberately not
+  "resume" (the assistant side of the conversation is not captured).
+- `prompthistory.build_primer(session, dir)` — returns `(text, err)`. Diffs use
+  `git diff --no-ext-diff` (the safe form; never plain `git diff`).
 
-Commands `:AgentDiff [session]` / `:AgentChat` are registered in
-`plugin/aiagent.lua`. They can also be driven remotely (e.g. from an agent) via
+Commands `:AgentDiff [session]` / `:AgentChat` / `:AgentSessions[!]` are
+registered in `plugin/aiagent.lua`. They can also be driven remotely (e.g. from an agent) via
 `nvim --server "$NVIM" --remote-expr "luaeval(\"require('aiagent').prompt_history_open()\")"`.
 
 ### Bundled skill (`skills/prompt-history/`, `:AgentInstallSkill`)

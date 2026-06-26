@@ -273,6 +273,23 @@ known_agents ~
 :AgentChat
   Close the prompt-history viewer and return to the agent chat.
 
+                                                          *:AgentSessions*
+:AgentSessions[!]
+  Pick a captured prompt-history session from a list (newest first).
+
+  Without `!`, selects the session to *continue capturing into*: new
+  prompts are appended to the chosen session instead of the Claude-assigned
+  one (writes `.prompt-history/active-session`).
+
+  With `!`, instead loads the chosen session's prompt history into the
+  running agent: it builds a primer — each prompt annotated with the files
+  it changed and the diff it produced — and types it into the agent's input
+  *without submitting*, so you can review it and press Enter. This
+  re-orients the agent on a previous session's intent. It is not a
+  conversation replay (the assistant's side is not captured) and is
+  deliberately not the same as Claude's `--resume`.
+  See |aiagent.prompt_history_load_context()|.
+
                                                        *:AgentInstallSkill*
 :AgentInstallSkill[!]
   Install the bundled `prompt-history` Claude skill into

@@ -23,6 +23,12 @@
 set -u
 MODE="${1:-}"
 
+# Prompts the plugin builds from the capture log (AgentSessions!) carry this
+# token on their first line. Submitting such a prompt is replaying history, so
+# we must NOT record it again. KEEP IN SYNC with M.PRIMER_MARKER in
+# lua/aiagent/prompthistory.lua.
+PRIMER_MARKER='AIAGENT_PROMPT_HISTORY_PRIMER'
+
 # --- read the hook payload once -------------------------------------------
 PAYLOAD="$(cat)"
 
@@ -123,6 +129,11 @@ case "$MODE" in
     # If a previous turn never closed (e.g. interrupted before Stop), close it
     # out now using the current state as its after-tree, then start fresh.
     write_record "$NOW"
+    # A primer rebuilt from this log (AgentSessions!) re-records history we
+    # already have. Close the prior turn above, but open no turn for the primer.
+    case "$(field '.prompt')" in
+      *"$PRIMER_MARKER"*) exit 0 ;;
+    esac
     jq -n -c \
       --arg prompt  "$(field '.prompt')" \
       --arg before  "$NOW" \
