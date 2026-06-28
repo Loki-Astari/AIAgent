@@ -174,6 +174,8 @@ local function force_cleanup()
   end
   M.agents = {}
   M.current_agent = nil
+  M._hidden_win_width = nil
+  M._hidden_win_height = nil
 
   -- Close windows
   if M.win ~= nil and vim.api.nvim_win_is_valid(M.win) then
@@ -702,6 +704,16 @@ local function create_window_layout()
   vim.api.nvim_set_option_value("list",           false, { win = M.win })
   vim.api.nvim_set_option_value("spell",          false, { win = M.win })
   vim.api.nvim_set_option_value("colorcolumn",    "",    { win = M.win })
+
+  -- Restore exact dimensions saved by hide() to prevent terminal reflow
+  if M._hidden_win_width then
+    vim.api.nvim_win_set_width(M.win, M._hidden_win_width)
+    M._hidden_win_width = nil
+  end
+  if M._hidden_win_height then
+    vim.api.nvim_win_set_height(M.win, M._hidden_win_height)
+    M._hidden_win_height = nil
+  end
 end
 
 --- Create a new agent
@@ -770,6 +782,10 @@ local function create_agent(name, cwd)
   end
 
   M.agents[name].job_id = job_id
+
+  -- High scrollback prevents history loss when the window is hidden and re-shown
+  -- (libvterm reflows content on resize, which can exceed the default 10000 limit).
+  vim.api.nvim_set_option_value("scrollback", 100000, { buf = buf })
 
   -- Track output to detect when a background agent finishes and needs attention.
   -- on_lines fires whenever the terminal buffer content changes (i.e. new output).
@@ -1569,14 +1585,36 @@ function M.print_list()
   end
 end
 
+--- Hide the agent window without killing any agents.
+--- The terminal buffers and jobs stay alive; toggle or open will restore the window.
+function M.hide()
+  if M.win and vim.api.nvim_win_is_valid(M.win) then
+    M._hidden_win_width = vim.api.nvim_win_get_width(M.win)
+    M._hidden_win_height = vim.api.nvim_win_get_height(M.win)
+    pcall(vim.api.nvim_win_close, M.win, true)
+    M.win = nil
+  end
+  if M.header_win and vim.api.nvim_win_is_valid(M.header_win) then
+    pcall(vim.api.nvim_win_close, M.header_win, true)
+    M.header_win = nil
+  end
+  if M.header_buf and vim.api.nvim_buf_is_valid(M.header_buf) then
+    pcall(vim.api.nvim_buf_delete, M.header_buf, { force = true, unload = false })
+    M.header_buf = nil
+  end
+  if M.prev_win and vim.api.nvim_win_is_valid(M.prev_win) then
+    vim.api.nvim_set_current_win(M.prev_win)
+  end
+end
+
 --- Toggle the AI agent window
 ---@param name string|nil Agent name (defaults to "AIAgent")
 function M.toggle(name)
   local agent_name = name or "AIAgent"
 
-  -- If this specific agent is open and visible, close it
+  -- If window is open and showing this agent, hide it (keep session alive)
   if M.is_open() and M.current_agent == agent_name then
-    M.close(agent_name)
+    M.hide()
   else
     M.open(agent_name)
   end

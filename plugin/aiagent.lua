@@ -11,6 +11,7 @@ vim.g.loaded_aiagent = true
 vim.api.nvim_create_user_command("AgentOpen",  function(o) require("aiagent").open(unpack(o.fargs)) end, { nargs = "*" })
 vim.api.nvim_create_user_command("AgentClose",  function(o) require("aiagent").close(o.args ~= "" and o.args or nil) end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentToggle", function(o) require("aiagent").toggle(o.args ~= "" and o.args or nil) end, { nargs = "?" })
+vim.api.nvim_create_user_command("AgentHide",   function() require("aiagent").hide() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentSwitch", function(o) require("aiagent").switch(o.args) end, { nargs = 1 })
 vim.api.nvim_create_user_command("AgentSet",    function(o) require("aiagent").set(o.args) end, { nargs = 1 })
 vim.api.nvim_create_user_command("AgentSetColor", function(o) require("aiagent").set_color(o.args) end, { nargs = 1 })
