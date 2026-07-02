@@ -195,8 +195,17 @@ known_agents ~
 
                                                             *:AgentToggle*
 :AgentToggle [Name]
-  Toggle the agent window. Opens if closed, closes if the named agent
-  is currently visible.
+  Toggle the agent window. Opens if closed, hides it (see |:AgentHide|)
+  if the named agent is currently visible.
+
+                                                              *:AgentHide*
+:AgentHide
+  Hide the agent terminal window without stopping the agent. The window
+  and its header are closed but the agent's job and buffer stay alive, so
+  the session keeps running in the background and can be brought back with
+  |:AgentOpen|, |:AgentToggle| or |:AgentSwitch|. Contrast with
+  |:AgentClose|, which stops the agent. Focus returns to the previous
+  window.
 
                                                             *:AgentSwitch*
 :AgentSwitch {Name}
@@ -347,6 +356,11 @@ close({name})
 toggle({name})
   Programmatic equivalent of |:AgentToggle|.
 
+                                                     *aiagent.hide()*
+hide()
+  Programmatic equivalent of |:AgentHide|. Closes the agent window and
+  header while leaving the agent job and buffer running.
+
                                                    *aiagent.switch()*
 switch({name})
   Programmatic equivalent of |:AgentSwitch|.
@@ -475,6 +489,40 @@ prompt_history_open({session})
                                         *aiagent.prompt_history_close()*
 prompt_history_close()
   Close the prompt-history viewer. Equivalent of |:AgentChat|.
+
+                                         *aiagent.prompt_history_list()*
+prompt_history_list({load_context})
+  Present a |vim.ui.select| picker of captured prompt-history sessions
+  (newest first, each labelled with its turn count, start time and first
+  prompt; the active capture session is marked with `*`). Programmatic
+  equivalent of |:AgentSessions|.
+
+  {load_context}  boolean|nil
+    falsy  Pick the session to *continue capturing into*. Writes the chosen
+           id to `.prompt-history/active-session` so the capture hook appends
+           new prompts there instead of Claude's own session id. A
+           `(default)` pseudo-entry restores the normal behaviour. If the
+           diff viewer is open it follows the selection.
+    true   Pick a session whose history is loaded into the running agent via
+           |aiagent.prompt_history_load_context()| (the `:AgentSessions!`
+           bang). The `(default)` entry is omitted in this mode.
+
+                                  *aiagent.prompt_history_load_context()*
+prompt_history_load_context({session}, {agent_name})
+  Build a primer from a captured session — each prompt annotated with the
+  files it changed and the diff it produced (built with
+  `git diff --no-ext-diff`) — and TYPE it into the agent's input *without
+  submitting*, so you review it
+  and press Enter. This re-orients the agent on a previous session's intent;
+  it is NOT a conversation replay (the assistant's side is not captured) and
+  is deliberately not the same as Claude's `--resume`.
+
+  {session}     string    prompt-history session id to load
+  {agent_name}  string|nil  agent to target (default: current agent, or a
+                            freshly opened `AIAgent`)
+
+  As with |aiagent.send_diagnostics()|, `\x1bi` is written to the terminal
+  first so agents using vim keybindings land in insert mode.
 
                                             *aiagent.install_skill()*
 install_skill({opts})
@@ -794,6 +842,34 @@ INSPECT FROM THE TERMINAL ~
     prompt_history_inspect.sh <session-id>       dump a session's prompts
     prompt_history_inspect.sh <session-id> <n>   changed files for prompt #n
 <
+SESSIONS ~
+
+|:AgentDiff| defaults to the running agent's live session, but a repo
+accumulates one JSONL file per session under `.prompt-history/sessions/`.
+|:AgentSessions| picks among them (newest first; the active capture session is
+marked `*`) and has two modes:
+
+  :AgentSessions      Choose the session to *continue capturing into*. The
+                      chosen id is written to `.prompt-history/active-session`
+                      and the capture hook appends subsequent prompts there
+                      rather than to Claude's own session id. Useful for
+                      keeping one continuous history across `--resume` restarts
+                      or several short Claude sessions. Pick `(default)` to
+                      revert to Claude's session id. If the diff viewer is open
+                      it follows the selection.
+
+  :AgentSessions!     Load the chosen session's prompt history back into the
+                      running agent. A primer — every prompt annotated with the
+                      files it changed and the diff it produced — is typed into
+                      the agent's input *without submitting*, so you review it
+                      and press Enter. This re-orients the agent on an earlier
+                      session's intent. It is not a conversation replay (the
+                      assistant's replies are not captured) and is deliberately
+                      distinct from Claude's `--resume`.
+
+See |aiagent.prompt_history_list()| and
+|aiagent.prompt_history_load_context()|.
+
 CLAUDE SKILL ~
 
 The plugin bundles a `prompt-history` Claude skill that lets an agent drive the
@@ -802,8 +878,9 @@ viewer for you. Install it with |:AgentInstallSkill|; it is copied into
 in, and you are then prompted to wire the capture hooks above into
 `~/.claude/settings.json` automatically (idempotent; a `.bak` is written).
 
-See also |:AgentDiff|, |:AgentChat|, |:AgentInstallSkill|,
-|aiagent.prompt_history_open()|, |aiagent.install_skill()|.
+See also |:AgentDiff|, |:AgentChat|, |:AgentSessions|, |:AgentInstallSkill|,
+|aiagent.prompt_history_open()|, |aiagent.prompt_history_list()|,
+|aiagent.install_skill()|.
 
 ==============================================================================
 14. HEALTH CHECK                                           *aiagent-health*

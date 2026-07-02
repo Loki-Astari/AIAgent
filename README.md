@@ -92,7 +92,8 @@ require("aiagent").setup({
 | `:AgentSetColor {color}` | Change the color of the current agent |
 | `:AgentOpen [Name [WTName [directory]]]` | Open an agent terminal (see below for full syntax) |
 | `:AgentClose [name]` | Close an agent (defaults to current) |
-| `:AgentToggle [name]` | Toggle an agent terminal |
+| `:AgentToggle [name]` | Toggle an agent terminal (hides it if visible, keeping the session alive) |
+| `:AgentHide` | Hide the agent window without stopping the agent (the session keeps running in the background) |
 | `:AgentSwitch {name}` | Switch to an existing agent by name |
 | `:AgentList` | Show running agents |
 | `:AgentCloseAll` | Close all agents |
@@ -103,6 +104,7 @@ require("aiagent").setup({
 | `:'<,'>AgentSendDiagnostics` | Send LSP diagnostics for the selected lines only |
 | `:AgentDiff [session]` | Open the prompt-history diff viewer (defaults to the current session; pass a session id to view an older one) |
 | `:AgentChat` | Close the prompt-history viewer and return to the agent chat |
+| `:AgentSessions[!]` | Pick a captured session: plain sets the session to keep capturing into; `!` loads the chosen session's history back into the agent |
 | `:AgentInstallSkill[!]` | Install the bundled `prompt-history` Claude skill into `~/.claude/skills/` and offer to wire the capture hooks (`!` overwrites an existing skill install) |
 
 ### Supported agents
@@ -465,6 +467,27 @@ The viewer fills a new tabpage:
 
 The current turn is only recorded once it finishes, so a brand-new session with
 no completed turns yet opens empty.
+
+### Working with sessions
+
+`:AgentDiff` shows the running agent's live session, but each repo accumulates
+one history file per session under `.prompt-history/sessions/`. `:AgentSessions`
+lists them (newest first; the active capture session is marked `*`) and has two
+modes:
+
+- **`:AgentSessions`** — choose the session to **keep capturing into**. The
+  chosen id is written to `.prompt-history/active-session`, so the capture hook
+  appends new prompts there instead of to Claude's own session id. This is handy
+  for stitching one continuous history across `claude --resume` restarts or a
+  string of short sessions. Pick the `(default)` entry to go back to Claude's
+  session id. If the diff viewer is open, it follows your selection.
+- **`:AgentSessions!`** — **load a previous session's history back into the
+  agent**. It builds a primer — each prompt annotated with the files it changed
+  and the diff it produced — and types it into the agent's prompt **without
+  submitting**, so you can review it and press Enter. This re-orients the agent
+  on what an earlier session was doing. It is *not* a conversation replay (the
+  assistant's replies aren't captured) and is deliberately different from
+  Claude's `--resume`.
 
 ### Capture setup
 
