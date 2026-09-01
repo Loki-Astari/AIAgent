@@ -15,7 +15,14 @@ vim.api.nvim_create_user_command("AgentHide",   function() require("aiagent").hi
 vim.api.nvim_create_user_command("AgentSwitch", function(o) require("aiagent").switch(o.args) end, { nargs = 1 })
 vim.api.nvim_create_user_command("AgentSet",    function(o) require("aiagent").set(o.args) end, { nargs = 1 })
 vim.api.nvim_create_user_command("AgentSetColor", function(o) require("aiagent").set_color(o.args) end, { nargs = 1 })
-vim.api.nvim_create_user_command("AgentList",   function() require("aiagent").print_list() end, { nargs = 0 })
+-- Plain `:AgentList` lists this instance's agents; `:AgentList!` opens the
+-- machine-wide list of every agent in every Neovim instance.
+vim.api.nvim_create_user_command("AgentList", function(o)
+  if o.bang then require("aiagent").show_all() else require("aiagent").print_list() end
+end, { nargs = 0, bang = true })
+vim.api.nvim_create_user_command("AgentTask", function(o)
+  require("aiagent").set_task(o.args)
+end, { nargs = "*" })
 vim.api.nvim_create_user_command("AgentCloseAll", function() require("aiagent").close_all() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentSendContext",   function() require("aiagent").send_context() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentResetContext",  function() require("aiagent").reset_context() end, { nargs = 0 })

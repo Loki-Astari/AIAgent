@@ -44,6 +44,7 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 - `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, `:AgentSendDiagnostics`, `:AgentDiff`, `:AgentChat`, etc.)
 - `lua/aiagent/init.lua` - Main Lua module with all plugin logic
 - `lua/aiagent/prompthistory.lua` - Prompt-history diff viewer (see [Prompt History](#prompt-history))
+- `lua/aiagent/registry.lua` - Cross-instance agent registry and its list viewer (see [Agent Registry](#agent-registry))
 - `lua/aiagent/health.lua` - Health check implementation (`:checkhealth aiagent`)
 - `hooks/prompt_snapshot.sh` - Claude Code `pre`/`post` hooks that capture per-prompt git tree snapshots
 - `hooks/prompt_history_inspect.sh` - Terminal tool to list/dump captured sessions
@@ -52,7 +53,7 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 
 The plugin manages state via module-level variables (`M.agents`, `M.current_agent`, `M.win`, `M.header_buf`, `M.header_win`, `M.prev_win`) and uses autocmds for cleanup on QuitPre/VimLeavePre.
 
-Each agent entry in `M.agents[name]` tracks: `buf`, `job_id`, `scroll_mode`, `scroll_pos`, `agent_type`, `command`, `sent_files`, `color`, `worktree` (path or nil), `git_root` (repo root or nil), `slug` (worktree slug or nil).
+Each agent entry in `M.agents[name]` tracks: `buf`, `job_id`, `scroll_mode`, `scroll_pos`, `agent_type`, `command`, `sent_files`, `color`, `worktree` (path or nil), `git_root` (repo root or nil), `slug` (worktree slug or nil), `task` (explicit label or nil), `started` (epoch seconds).
 
 ## Lualine Integration
 
@@ -249,6 +250,74 @@ into `~/.claude/settings.json`:
 - Does not auto-detect jq absence fatally — if `jq` isn't on PATH it returns a
   change note telling the user to wire manually, rather than failing the skill
   copy.
+
+## Agent Registry
+
+Lists every agent in every running Neovim instance (`:AgentList!`), so a user
+with Neovim open in several terminal windows can see what each one is doing and
+jump to it.
+
+### Design constraints
+
+- **No IPC and no heartbeat.** Each instance publishes one JSON sidecar per
+  agent into `$XDG_STATE_HOME/aiagent/agents/<nvim_pid>-<agent>.json`
+  (default `~/.local/state/aiagent/...`, deliberately outside Neovim's own
+  state dir so a shell script could read it too). Nothing polls anything.
+- **Liveness is verified on read, never trusted from the file.**
+  `read_all()` unlinks any sidecar whose `nvim_pid` or `job_pid` is dead
+  (`uv.kill(pid, 0)`), and for remote entries also requires the recorded
+  `nvim_server` socket to still exist (guards against pid reuse). This is why
+  no heartbeat is needed and why a SIGKILLed instance leaves no debris.
+- **Anything Claude Code already tracks is read from Claude Code**, merged in at
+  read time so it is never stale: `~/.claude/sessions/<job_pid>.json` supplies
+  `status` (busy/idle), `statusUpdatedAt`, `sessionId`, `cwd` and Claude's own
+  derived `name`. The sidecar carries only what the plugin knows and Claude does
+  not (agent name, colour, worktree slug, task label, `v:servername`, terminal
+  pane ids).
+
+### Publish points
+
+`M.open` (deferred 200ms, so the job pid and shell cwd have settled),
+`M.switch` (keeps the `current` flag accurate), and `M.set_task`. Removal is in
+`cleanup_agent`, which covers `:AgentClose`, `:AgentCloseAll` and VimLeavePre.
+All publish calls are wrapped in `pcall` — the registry is a convenience and
+must never break opening an agent.
+
+### Task label
+
+`entry.label` is `agent.task` when set (`:AgentTask`), else derived from the
+session transcript by `registry.last_prompt()`. Two non-obvious details there:
+
+- **Tail reads escalate** (`TAIL_STEPS` = 64KB → 512KB → 4MB). A single turn's
+  tool output can run to hundreds of kilobytes, so the newest human prompt is
+  often far from EOF — a fixed 64KB tail silently returns nil on busy sessions.
+- **`human_text()` filters non-human turns**: entries containing a
+  `tool_result` part are rejected outright, and the XML-ish envelopes Claude
+  Code injects (`<command-name>`, `<system-reminder>`, `<local-command-stdout>`)
+  are stripped before the first non-empty line is taken.
+
+### Focus
+
+`M.focus(entry)` does two independent best-effort steps: `nvim --server
+<socket> --remote-expr` to make the owning instance display that agent (the
+expression ends in `or 1` because `--remote-expr` errors on a nil result), then
+`focus_cmd(entry)` to raise the terminal pane. Detection order is tmux →
+iTerm2 → kitty → WezTerm (multiplexer before emulator, since raising the pane
+is what actually reveals the agent); `config.focus_cmd` overrides it and may
+return nil to fall through. iTerm2 uses `osascript` matching on the GUID half
+of `$ITERM_SESSION_ID`, which is iTerm's session `id`.
+
+Both steps go through a local `spawn()` helper rather than `vim.fn.jobstart`
+directly: **jobstart raises E475 on a non-executable argv[0]**, which a missing
+`tmux`/`kitten`/`wezterm` binary or a hand-written `focus_cmd` easily produces.
+`spawn()` checks `executable()` and pcalls, so focusing degrades to a warning.
+
+### Rendering
+
+`M.render(entries)` returns `(lines, highlights)` and is pure, so it is unit
+tested without a window. Highlight ranges are **byte** offsets (for extmarks)
+while column padding is computed in **display** width — the `▶` marker is three
+bytes and one cell, so the two must not be conflated (a test asserts both).
 
 ## GitHub MCP Setup
 

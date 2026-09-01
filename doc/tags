@@ -5,6 +5,7 @@
 :AgentHide	aiagent.txt	/*:AgentHide*
 :AgentInstallSkill	aiagent.txt	/*:AgentInstallSkill*
 :AgentList	aiagent.txt	/*:AgentList*
+:AgentList!	aiagent.txt	/*:AgentList!*
 :AgentOpen	aiagent.txt	/*:AgentOpen*
 :AgentResetContext	aiagent.txt	/*:AgentResetContext*
 :AgentSendContext	aiagent.txt	/*:AgentSendContext*
@@ -14,6 +15,7 @@
 :AgentSet	aiagent.txt	/*:AgentSet*
 :AgentSetColor	aiagent.txt	/*:AgentSetColor*
 :AgentSwitch	aiagent.txt	/*:AgentSwitch*
+:AgentTask	aiagent.txt	/*:AgentTask*
 :AgentToggle	aiagent.txt	/*:AgentToggle*
 aiagent-api	aiagent.txt	/*aiagent-api*
 aiagent-bufferline	aiagent.txt	/*aiagent-bufferline*
@@ -23,6 +25,7 @@ aiagent-config-agent_startup_delay	aiagent.txt	/*aiagent-config-agent_startup_de
 aiagent-config-auto_send_context	aiagent.txt	/*aiagent-config-auto_send_context*
 aiagent-config-colors	aiagent.txt	/*aiagent-config-colors*
 aiagent-config-default_agent	aiagent.txt	/*aiagent-config-default_agent*
+aiagent-config-focus_cmd	aiagent.txt	/*aiagent-config-focus_cmd*
 aiagent-config-idle_notify	aiagent.txt	/*aiagent-config-idle_notify*
 aiagent-config-idle_timeout_ms	aiagent.txt	/*aiagent-config-idle_timeout_ms*
 aiagent-config-known_agents	aiagent.txt	/*aiagent-config-known_agents*
@@ -43,6 +46,11 @@ aiagent-lualine-mcp	aiagent.txt	/*aiagent-lualine-mcp*
 aiagent-lualine-mcp-scroll	aiagent.txt	/*aiagent-lualine-mcp-scroll*
 aiagent-lualine-mode	aiagent.txt	/*aiagent-lualine-mode*
 aiagent-prompt-history	aiagent.txt	/*aiagent-prompt-history*
+aiagent-registry	aiagent.txt	/*aiagent-registry*
+aiagent-registry-focus	aiagent.txt	/*aiagent-registry-focus*
+aiagent-registry-sidecar	aiagent.txt	/*aiagent-registry-sidecar*
+aiagent-registry-status	aiagent.txt	/*aiagent-registry-status*
+aiagent-registry-task	aiagent.txt	/*aiagent-registry-task*
 aiagent-requirements	aiagent.txt	/*aiagent-requirements*
 aiagent-setup	aiagent.txt	/*aiagent-setup*
 aiagent-worktrees	aiagent.txt	/*aiagent-worktrees*
@@ -55,6 +63,7 @@ aiagent.install_hooks()	aiagent.txt	/*aiagent.install_hooks()*
 aiagent.install_skill()	aiagent.txt	/*aiagent.install_skill()*
 aiagent.is_open()	aiagent.txt	/*aiagent.is_open()*
 aiagent.list()	aiagent.txt	/*aiagent.list()*
+aiagent.list_all()	aiagent.txt	/*aiagent.list_all()*
 aiagent.lualine_branch()	aiagent.txt	/*aiagent.lualine_branch()*
 aiagent.lualine_color()	aiagent.txt	/*aiagent.lualine_color()*
 aiagent.lualine_label()	aiagent.txt	/*aiagent.lualine_label()*
@@ -74,7 +83,9 @@ aiagent.send_diagnostics()	aiagent.txt	/*aiagent.send_diagnostics()*
 aiagent.send_selection()	aiagent.txt	/*aiagent.send_selection()*
 aiagent.set()	aiagent.txt	/*aiagent.set()*
 aiagent.set_color()	aiagent.txt	/*aiagent.set_color()*
+aiagent.set_task()	aiagent.txt	/*aiagent.set_task()*
 aiagent.setup()	aiagent.txt	/*aiagent.setup()*
+aiagent.show_all()	aiagent.txt	/*aiagent.show_all()*
 aiagent.switch()	aiagent.txt	/*aiagent.switch()*
 aiagent.toggle()	aiagent.txt	/*aiagent.toggle()*
 aiagent.txt	aiagent.txt	/*aiagent.txt*

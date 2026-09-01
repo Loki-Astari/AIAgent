@@ -13,6 +13,10 @@ M.config = {
   idle_notify     = false,    -- also fire vim.notify when flagging attention
   mcp_max_width   = 35,       -- max statusline columns for MCP display before scrolling
   mcp_scroll      = true,     -- scroll MCP display when wider than mcp_max_width
+  -- function(entry) -> string[]|nil : command that raises another instance's
+  -- terminal pane, overriding the built-in tmux/iTerm2/kitty/wezterm detection.
+  -- Return nil to fall through to the built-in handling.
+  focus_cmd       = nil,
   colors = { "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" },
   -- Map of symbolic names to CLI executables. Extend this in setup() for custom agents.
   known_agents = {
@@ -29,7 +33,7 @@ M.config = {
 }
 
 -- Track agents and windows
-M.agents = {}           -- { name = { buf, job_id, scroll_mode, scroll_pos, agent_type, command, sent_files, color, worktree, git_root, slug, attention_needed, last_output_time, line_count_at_visit } }
+M.agents = {}           -- { name = { buf, job_id, scroll_mode, scroll_pos, agent_type, command, sent_files, color, worktree, git_root, slug, attention_needed, last_output_time, line_count_at_visit, task, started } }
 M.current_agent = nil   -- name of active agent
 M.current_agent_type = "claude"  -- symbolic agent name used for new agents
 M.win = nil             -- shared terminal window
@@ -155,6 +159,10 @@ local function cleanup_agent(name)
   if agent.buf ~= nil and vim.api.nvim_buf_is_valid(agent.buf) then
     pcall(vim.api.nvim_buf_delete, agent.buf, { force = true, unload = false })
   end
+
+  -- Withdraw from the cross-instance registry.  A crash skips this; read_all()
+  -- prunes by process liveness, so nothing is left stranded either way.
+  pcall(function() require('aiagent.registry').unpublish(name) end)
 
   M.agents[name] = nil
 end
@@ -599,7 +607,7 @@ local function update_header()
   local lines = {
     "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-v> paste reg",
     "<C-\\><C-c> send context | <C-\\><C-a> cycle agents",
-    "<C-\\><C-d> diff viewer | <C-\\><C-r> search input",
+    "<C-\\><C-d> diff | <C-\\><C-r> search | <C-\\><C-l> all agents",
   }
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
@@ -643,6 +651,8 @@ function M.switch(name)
   if not agent.scroll_mode then
     vim.cmd("startinsert")
   end
+
+  pcall(function() require('aiagent.registry').publish_all() end)
 end
 
 --- Cycle to the next agent
@@ -947,6 +957,14 @@ local function create_agent(name, cwd)
     end,
   })
 
+  -- Open the machine-wide agent list (every agent in every Neovim instance).
+  vim.api.nvim_buf_set_keymap(buf, "t", "<C-\\><C-l>", "", {
+    noremap = true,
+    callback = function()
+      M.show_all()
+    end,
+  })
+
   return buf
 end
 
@@ -1116,6 +1134,12 @@ function M.open(name, wtname, directory)
     M.agents[agent_name].git_root = worktree_git_root
     M.agents[agent_name].slug = worktree_slug
   end
+
+  -- Announce to other Neovim instances.  Deferred so the agent's job pid and
+  -- the shell's cwd have settled before the sidecar is written.
+  vim.defer_fn(function()
+    pcall(function() require('aiagent.registry').publish_all() end)
+  end, 200)
 
   update_header()
   vim.cmd("startinsert")
@@ -1583,6 +1607,39 @@ function M.print_list()
     end
     vim.notify("Agents:\n" .. table.concat(lines, "\n"), vim.log.levels.INFO)
   end
+end
+
+--- Set the one-line task label shown for an agent in the global list.
+--- Overrides the label derived from the session's last prompt; an empty string
+--- clears it and falls back to the derived one.
+---@param text string Task description
+---@param name string|nil Agent name (defaults to current)
+function M.set_task(text, name)
+  local agent_name = name or M.current_agent
+  local agent = agent_name and M.agents[agent_name]
+  if not agent then
+    vim.notify("No agent active", vim.log.levels.WARN)
+    return
+  end
+  text = vim.trim(text or "")
+  agent.task = (text ~= "") and text or nil
+  pcall(function() require('aiagent.registry').publish(agent_name) end)
+  if agent.task then
+    vim.notify(agent_name .. ": " .. agent.task, vim.log.levels.INFO)
+  else
+    vim.notify(agent_name .. ": task label cleared", vim.log.levels.INFO)
+  end
+end
+
+--- Every live agent published on this machine, across all Neovim instances.
+---@return table[]
+function M.list_all()
+  return require('aiagent.registry').read_all()
+end
+
+--- Show the machine-wide agent list in a floating window.
+function M.show_all()
+  require('aiagent.registry').show()
 end
 
 --- Hide the agent window without killing any agents.

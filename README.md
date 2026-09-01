@@ -17,6 +17,7 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 - **Idle attention alerts** - When a background agent finishes or pauses for input, its tab is highlighted with a `●` indicator so you know to switch back
 - **Lualine integration** - Optional helpers for lualine.nvim: shows the active agent name and mode in section A, the worktree branch in section B, and connected MCP servers in section X
 - **Prompt history** - Capture the before/after code changes for every prompt of an agent session and browse them in a side-by-side diff viewer, so you can see exactly what each prompt produced
+- **Machine-wide agent list** - One keystroke shows every agent in every Neovim window you have open, what each is working on, and which are waiting on you - then jumps to the one you want
 
 ## Requirements
 
@@ -95,7 +96,9 @@ require("aiagent").setup({
 | `:AgentToggle [name]` | Toggle an agent terminal (hides it if visible, keeping the session alive) |
 | `:AgentHide` | Hide the agent window without stopping the agent (the session keeps running in the background) |
 | `:AgentSwitch {name}` | Switch to an existing agent by name |
-| `:AgentList` | Show running agents |
+| `:AgentList` | Show this instance's running agents |
+| `:AgentList!` | Show every agent in every Neovim instance, and jump to one |
+| `:AgentTask [text]` | Set the task label shown for the current agent in `:AgentList!` (no args clears it) |
 | `:AgentCloseAll` | Close all agents |
 | `:AgentSendContext` | Send open buffer file paths to the agent |
 | `:AgentResetContext` | Reset tracking to re-send all buffer paths |
@@ -145,6 +148,8 @@ When in the agent terminal:
 | `<C-\><C-a>` | terminal | Cycle to the next agent |
 | `<C-\><C-c>` | terminal | Send open buffer file paths as context |
 | `<C-\><C-v>` | terminal | Paste the unnamed register `"` into the terminal input |
+| `<C-\><C-d>` | terminal | Open the prompt-history diff viewer (`:AgentDiff`) |
+| `<C-\><C-l>` | terminal | List agents in all Neovim instances (`:AgentList!`) |
 | `i` | scroll | Exit scroll mode and resume terminal interaction |
 | `<C-\><C-n>` | scroll | Exit scroll mode and return to your previous window |
 
@@ -193,6 +198,7 @@ vim.keymap.set("n", "<leader>at", "<cmd>AgentToggle<cr>",           { desc = "To
 vim.keymap.set("v", "<leader>as", "<cmd>AgentSendSelection<cr>",    { desc = "Send selection to agent" })
 vim.keymap.set("n", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",  { desc = "Send LSP diagnostics to agent" })
 vim.keymap.set("v", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",  { desc = "Send LSP diagnostics (selection) to agent" })
+vim.keymap.set("n", "<leader>al", "<cmd>AgentList!<cr>",          { desc = "List agents in all Neovim instances" })
 ```
 
 ## Buffer Context Integration
@@ -544,6 +550,68 @@ Claude Code afterwards so it picks up the new hooks. Re-run with
 
 If you decline the prompt, the installed skill's `reference/install.md`
 documents the manual wiring with your paths already substituted in.
+
+## Machine-Wide Agent List
+
+If you keep Neovim open in several terminal windows - one per repo, one per
+task - `:AgentList` only knows about the instance you happen to be in.
+`:AgentList!` shows all of them:
+
+```
+ ▶ AIAgent   busy      agent/history   …/lazy/AIAgent  add a global agent list
+   Refactor  idle 16m  agent/refactor  ~/Repo/app      why does the loader retry
+   Docs      idle 2h   main            ~/Repo/site     -
+```
+
+Columns: current-agent marker, agent name (in its own colour), status, branch,
+directory, task. `▶` marks the agent showing in the window you are in now.
+
+| Key | Action |
+|-----|--------|
+| `<CR>` | Bring that agent to the front - its Neovim switches to it, and its terminal window is raised |
+| `r` | Refresh |
+| `q` / `<Esc>` | Close |
+
+**Status** is read from Claude Code's own per-process session file, so it is
+never the plugin's guess. `idle` means the agent has stopped and is waiting on
+you, followed by how long it has been waiting - that is the column to scan when
+you are deciding which window to go back to. Non-Claude CLIs show `-`.
+
+**Task** defaults to the agent's most recent prompt, pulled from the session
+transcript. When that is not a useful summary (often it is `yes` or `continue`),
+pin a real one:
+
+```vim
+:AgentTask rewrite the diff viewer to use extmarks
+```
+
+The explicit label wins; `:AgentTask` with no arguments clears it and returns to
+the derived one.
+
+### How it finds the other instances
+
+Each Neovim instance writes one small JSON file per agent into
+`~/.local/state/aiagent/agents/` (`$XDG_STATE_HOME` is honoured). Nothing polls
+and no instance talks to another: liveness is checked when the list is read, and
+entries whose Neovim or agent process is gone are dropped and their files
+deleted. A crash leaves no debris.
+
+Raising the terminal window is best-effort, detected at publish time from the
+environment - tmux (`$TMUX_PANE`), iTerm2 (`$ITERM_SESSION_ID`), kitty
+(`$KITTY_WINDOW_ID`), and WezTerm (`$WEZTERM_PANE`), with a multiplexer taking
+precedence over the emulator. To teach it something else:
+
+```lua
+require('aiagent').setup({
+  focus_cmd = function(entry)
+    -- entry.term holds whatever pane identifiers were captured
+    return { 'my-wm', 'focus', entry.term.tmux }
+  end,
+})
+```
+
+If nothing is detected, `<CR>` still switches the remote agent and tells you
+which directory and Neovim pid it belongs to.
 
 ## Health Check
 

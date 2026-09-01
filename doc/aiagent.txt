@@ -20,7 +20,8 @@ CONTENTS                                                    *aiagent-contents*
  11. Bufferline Integration .... |aiagent-bufferline|
  12. Lualine Integration ........ |aiagent-lualine|
  13. Prompt History ............ |aiagent-prompt-history|
- 14. Health check .............. |aiagent-health|
+ 14. Agent Registry ........... |aiagent-registry|
+ 15. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -166,6 +167,22 @@ mcp_scroll ~
   Set to `false` to always show the full list without scrolling.
   See |aiagent-lualine-mcp|.
 
+                                              *aiagent-config-focus_cmd*
+focus_cmd ~
+  Type: function(entry) -> string[]|nil  Default: `nil`
+  Command used to raise another Neovim instance's terminal window when
+  you press <CR> in the machine-wide agent list (|:AgentList!|). Overrides
+  the built-in tmux / iTerm2 / kitty / WezTerm detection; return `nil` to
+  fall back to it. {entry} is a registry entry (see |aiagent-registry|),
+  whose `term` field holds whatever pane identifiers were captured. >lua
+    focus_cmd = function(entry)
+      if entry.term.tmux then
+        return { "tmux", "select-pane", "-t", entry.term.tmux }
+      end
+    end
+<
+  See |aiagent-registry-focus|.
+
                                             *aiagent-config-known_agents*
 known_agents ~
   Type: table<string, string>  (symbolic name → CLI executable)
@@ -224,7 +241,23 @@ known_agents ~
                                                               *:AgentList*
 :AgentList
   Print a list of running agents with their types. The current agent
-  is marked with `*`.
+  is marked with `*`. Only agents of THIS Neovim instance.
+
+                                                             *:AgentList!*
+:AgentList!
+  Open the machine-wide agent list: every agent in every running Neovim
+  instance, with its status, branch, directory and task. Press <CR> to
+  bring the agent under the cursor to the front — its own Neovim switches
+  to it and its terminal window is raised. `r` refreshes, `q` closes.
+  See |aiagent-registry|.
+
+                                                              *:AgentTask*
+:AgentTask [text]
+  Set the one-line task label shown for the current agent in
+  |:AgentList!|. With no arguments the label is cleared and the list
+  falls back to the agent's most recent prompt. >
+    :AgentTask rewrite the diff viewer to use extmarks
+<
 
                                                           *:AgentCloseAll*
 :AgentCloseAll
@@ -322,6 +355,7 @@ Terminal mode ~
   <C-\><C-v>    Paste the unnamed register `"` into the terminal input
   <C-\><C-d>    Open the prompt-history diff viewer (see |:AgentDiff|)
   <C-\><C-r>    Search input history (agent-specific)
+  <C-\><C-l>    List agents in all Neovim instances (see |:AgentList|)
 
 Scroll mode (normal mode inside terminal buffer) ~
   i             Exit scroll mode and resume terminal input
@@ -413,6 +447,21 @@ list()
                                               *aiagent.print_list()*
 print_list()
   Notify the running agents via |vim.notify|. Equivalent of |:AgentList|.
+
+                                                  *aiagent.list_all()*
+list_all()
+  Return every live agent published on this machine as a list of registry
+  entries, across all Neovim instances. See |aiagent-registry| for the
+  entry fields.
+
+                                                  *aiagent.show_all()*
+show_all()
+  Open the machine-wide agent list. Equivalent of |:AgentList!|.
+
+                                                  *aiagent.set_task()*
+set_task({text}, {name})
+  Set the task label for an agent ({name} defaults to the current agent).
+  An empty {text} clears it. Equivalent of |:AgentTask|.
 
                                               *aiagent.close_all()*
 close_all()
@@ -883,7 +932,74 @@ See also |:AgentDiff|, |:AgentChat|, |:AgentSessions|, |:AgentInstallSkill|,
 |aiagent.install_skill()|.
 
 ==============================================================================
-14. HEALTH CHECK                                           *aiagent-health*
+14. AGENT REGISTRY                                       *aiagent-registry*
+
+When Neovim is open in several terminal windows — each in its own directory,
+each with its own agents — |:AgentList| only sees the instance you are in.
+|:AgentList!| sees them all: >
+
+   ▶ AIAgent   busy      agent/history   …/lazy/AIAgent  add a global list
+     Refactor  idle 16m  agent/refactor  ~/Repo/app      why does load retry
+<
+Columns are: current-agent marker, agent name (in the agent's colour), status,
+branch, directory, and task. `▶` marks the agent currently shown in THIS
+instance. Press <CR> on a row to bring that agent to the front, `r` to
+refresh, `q` to close.
+
+STATUS ~                                          *aiagent-registry-status*
+
+`busy` / `idle` come from Claude Code's own per-process session file
+(`~/.claude/sessions/<pid>.json`), not from the plugin. `idle` means the agent
+has stopped and is waiting on you — which is why it is the highlighted state —
+and is followed by how long it has been waiting. Agents that publish no such
+file (non-Claude CLIs) show `-`.
+
+TASK LABEL ~                                        *aiagent-registry-task*
+
+The task column answers "what is this one working on". By default it is the
+agent's most recent prompt, read from the session transcript. Set an explicit
+label with |:AgentTask| when the last prompt is not a useful summary (it often
+is not — "yes", "continue", "run the tests"); the explicit label always wins,
+and clearing it returns to the derived one.
+
+HOW IT WORKS ~                                    *aiagent-registry-sidecar*
+
+Each instance publishes one small JSON sidecar per agent into
+`$XDG_STATE_HOME/aiagent/agents/` (default `~/.local/state/aiagent/agents/`),
+named `<nvim-pid>-<agent>.json`. Sidecars are written when an agent is opened,
+switched to, or given a task label, and removed when it is closed.
+
+No instance ever talks to another to build the list, and there is no
+heartbeat. Instead, liveness is verified on read: an entry whose owning Neovim
+process or whose agent process is gone is dropped and its sidecar unlinked. A
+crashed instance therefore leaves nothing behind, and the first list after the
+crash cleans up after it.
+
+Entries carry the agent name, type, colour, worktree slug, task label, the
+Neovim server socket (|v:servername|), the agent's pid, and a `term` table
+identifying the terminal pane the instance is displayed in. Status, session id,
+cwd and the derived task label are merged in from Claude Code's own files at
+read time, so they are never stale.
+
+FOCUS ~                                            *aiagent-registry-focus*
+
+<CR> does two things: it asks the owning instance to switch to that agent
+(over its |--remote-expr| server socket), then raises the terminal pane that
+instance is displayed in. Pane raising is best-effort and picked from what was
+captured at publish time, in this order:
+
+  tmux       `$TMUX_PANE`         → `tmux switch-client`
+  iTerm2     `$ITERM_SESSION_ID`  → `osascript` session select
+  kitty      `$KITTY_WINDOW_ID`   → `kitten @ focus-window`
+  WezTerm    `$WEZTERM_PANE`      → `wezterm cli activate-pane`
+
+A multiplexer takes precedence over the emulator, since raising the pane is
+what actually reveals the agent. If none is detected you still get a notify
+telling you which directory and Neovim pid the agent belongs to; set
+|aiagent-config-focus_cmd| to teach it your terminal.
+
+==============================================================================
+15. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 
