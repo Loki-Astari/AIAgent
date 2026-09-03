@@ -704,6 +704,22 @@ describe("aiagent.history", function()
     assert.equals("jump", history.plan(tree, "u1").kind)
   end)
 
+  it("head() trusts the pointer only while it is the newest thing written", function()
+    local path = write_transcript("a2")
+    local parsed = history.parse(path)
+    -- Pointer is the last line in the file, so it names the position.
+    assert.equals("a2", history.head(parsed))
+
+    -- One entry appended after it and the pointer is stale, so the newest entry
+    -- wins.  This is what a fork relies on to capture (and restore) a source
+    -- session's position without stopping it.
+    vim.fn.writefile({ vim.json.encode({
+      type = "assistant", uuid = "a9", parentUuid = "a3",
+      message = { role = "assistant", content = { { type = "text", text = "later" } } },
+    }) }, path, "a")
+    assert.equals("a9", history.head(history.parse(path)))
+  end)
+
   it("anchors a rewind so the pointer names a real leaf", function()
     -- Resume only honours a pointer that names a LEAF; at a node with children
     -- it silently resumes the newest leaf instead.  Every rewind targets such a

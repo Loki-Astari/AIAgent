@@ -192,6 +192,14 @@ Jumping stops the agent, appends a position pointer to the transcript, and resta
 it with `--resume`, so the agent process restarts but nothing in your history is
 destroyed — every branch keeps its tip and a jump is always reversible.
 
+Press `f` instead of `<CR>` to **fork a new agent** from the node under the cursor.
+The current agent keeps running untouched; the fork starts as its own session with
+the context as it stood at that point. A small menu asks whether it should share the
+current working tree or get a worktree of its own (number keys or `<CR>`; `q`
+cancels), with a third option to name it something other than the default.
+`:AgentFork [name] [worktree]` does the same from wherever the current agent stands,
+skipping the menu when given both arguments.
+
 ### Idle attention alerts
 
 When you start a long-running job in one agent and switch to another, the plugin watches for the first agent to finish or pause. When it detects that a background agent has produced new output and then gone silent, its tab is highlighted and a `●` symbol is appended:

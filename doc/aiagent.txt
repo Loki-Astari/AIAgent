@@ -1035,7 +1035,8 @@ the history needs, capped at 60 rows, or at 80% of the screen when the screen
 cannot spare 60. The cursor starts on your current position at the bottom of
 the viewport, so a longer history scrolls back into the past above it.
 
-Press <CR> to jump to the turn under the cursor, `q` to close.
+Press <CR> to jump to the turn under the cursor, `f` to fork a new agent from
+it (see |:AgentFork|), `q` to close.
 
 HOW JUMPING WORKS ~                                  *aiagent-history-jump*
 
@@ -1068,6 +1069,41 @@ Two consequences worth knowing:
 
 Selecting the turn you are already on is a no-op. The jump is only implemented
 for Claude agents; other agent types report that and do nothing.
+
+FORKING FROM A NODE ~                                *aiagent-history-fork*
+
+                                                                  *:AgentFork*
+:AgentFork [name [worktree]]
+                        Fork a new agent from where the current agent stands.
+                        Press `f` on a row in |:AgentTree| to fork from an
+                        earlier point instead. With no arguments a small menu
+                        offers the choices below; an empty `worktree` argument
+                        means "share the source agent's", which skips it.
+
+The menu is the plugin's own float, not |vim.ui.select|: number keys pick an
+option directly, <CR> takes the row under the cursor, and `q` or <Esc> cancels
+(saying so, rather than doing nothing). A filtering picker is the wrong shape
+for a three-way choice, and a cmdline prompt is easy to miss entirely beside a
+busy agent terminal.
+
+A jump moves the agent you have; a fork leaves it alone and starts a second
+one from the chosen point. `--fork-session` resumes under a NEW session id and
+Claude Code copies the walked path into the new transcript (rewriting every
+entry's `sessionId`), so the fork is genuinely independent — it is not a view
+into the source session, and the two cannot clobber each other.
+
+The fork gets its own colour, tab and registry entry, and a task label naming
+the turn it came from, so |:AgentList| explains why it exists.
+
+Choosing a worktree gives the fork isolated files (branch `agent/{slug}`, as
+|:AgentOpen| creates), at the cost that the paths in its inherited context
+refer to the SOURCE tree. Sharing the source's tree keeps every remembered
+path valid but means two agents editing the same files.
+
+The source agent is never stopped. Its recorded position does move while the
+fork reads the transcript and is restored once the fork has started; that
+restore is best-effort by design, because the source's own next turn appends
+newer entries which supersede any stale pointer anyway.
 
 These transcript entry types are undocumented internals of Claude Code. If a
 future version changes them the tree reports that it cannot be read rather

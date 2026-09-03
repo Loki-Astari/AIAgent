@@ -122,6 +122,27 @@ function M.parse(path)
   return { nodes = nodes, order = order, leaf = leaf, leaf_pos = leaf_pos }
 end
 
+--- The entry the conversation actually stands on.
+---
+--- The `last-prompt` pointer is NOT rewritten for every turn — a resumed session
+--- may never write one at all — so it goes stale as soon as new turns are
+--- appended, and trusting it blindly reports the branch point as "here" while
+--- the turns just added look like an abandoned branch.
+---
+--- Whichever is newer in file order wins: the pointer when nothing has been
+--- appended after it (a jump not yet used), otherwise the last entry in the
+--- file, which necessarily belongs to the branch in use.
+---@param parsed table
+---@return string|nil uuid
+function M.head(parsed)
+  if not parsed then return nil end
+  local leaf = parsed.leaf
+  if leaf and parsed.nodes[leaf] and (parsed.leaf_pos or 0) >= #parsed.order then
+    return leaf
+  end
+  return parsed.order[#parsed.order]
+end
+
 --- Build the turn tree: one node per typed prompt, with each turn's assistant
 --- and tool traffic folded into its summary.
 ---@param parsed table|nil
@@ -194,20 +215,7 @@ function M.build(parsed)
     }
   end
 
-  -- Where the conversation actually stands.
-  --
-  -- The `last-prompt` pointer is NOT rewritten for every turn — a resumed
-  -- session may never write one at all — so it goes stale as soon as new turns
-  -- are appended, and trusting it blindly marks the branch point as "here"
-  -- while the turns you just added render as an abandoned branch.
-  --
-  -- Whichever is newer in file order wins: the pointer when nothing has been
-  -- appended after it (a jump that has not been used yet), otherwise the last
-  -- entry in the file, which necessarily belongs to the branch in use.
-  local head = parsed.leaf
-  if not head or not nodes[head] or (parsed.leaf_pos or 0) < #order then
-    head = order[#order]
-  end
+  local head = M.head(parsed)
 
   -- The turn you are *in*: the one whose subtree holds that entry.  It is never
   -- the turn's own last entry, so raw uuid comparison would say "not here".
@@ -540,6 +548,84 @@ function M.set_leaf(path, session_id, leaf, prompt)
 end
 
 ----------------------------------------------------------------------------
+-- A small menu
+----------------------------------------------------------------------------
+
+--- Pick one of a few options in a floating menu.
+---
+--- Deliberately NOT `vim.ui.select`: a user's select handler is often a
+--- filtering picker (telescope-ui-select puts a text input above the list,
+--- where typing filters rather than choosing, and <CR> on no match cancels
+--- silently), which is the wrong shape for a two-or-three-way decision.  The
+--- builtin `vim.ui.input`/`vim.ui.select` cmdline prompts are worse still next
+--- to a busy agent terminal — easy to miss entirely, so an action looks like a
+--- dead keybinding.  This matches the plugin's other popups instead.
+---
+--- Number keys pick directly, <CR> takes the row under the cursor, q/<Esc>
+--- cancel.  `on_choice` is called with the index, or nil when cancelled.
+---@param items string[]
+---@param opts table|nil { title: string|nil }
+---@param on_choice fun(idx: integer|nil)
+function M.menu(items, opts, on_choice)
+  opts = opts or {}
+  if #items == 0 then return on_choice(nil) end
+
+  local lines = {}
+  for i, item in ipairs(items) do
+    lines[i] = string.format('  %d. %s  ', i, item)
+  end
+  local title = opts.title and (' ' .. opts.title .. ' ') or nil
+  local width = title and vim.fn.strdisplaywidth(title) or 0
+  for _, l in ipairs(lines) do width = math.max(width, vim.fn.strdisplaywidth(l)) end
+  width = math.min(width + 1, vim.o.columns - 4)
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_set_option_value('modifiable', false, { buf = buf })
+  vim.api.nvim_set_option_value('filetype', 'aiagentmenu', { buf = buf })
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    row = math.max(0, math.floor((vim.o.lines - #lines) / 2) - 1),
+    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+    width = width,
+    height = #lines,
+    style = 'minimal',
+    border = 'rounded',
+    title = title,
+    title_pos = 'center',
+  })
+  vim.api.nvim_set_option_value('cursorline', true, { win = win })
+
+  -- One-shot: the WinClosed fallback must not fire after a real choice.
+  local answered = false
+  local function finish(idx)
+    if answered then return end
+    answered = true
+    if vim.api.nvim_win_is_valid(win) then pcall(vim.api.nvim_win_close, win, true) end
+    if vim.api.nvim_buf_is_valid(buf) then pcall(vim.api.nvim_buf_delete, buf, { force = true }) end
+    -- Scheduled so the caller runs with the menu gone and focus settled.
+    vim.schedule(function() on_choice(idx) end)
+  end
+
+  local function map(lhs, fn)
+    vim.keymap.set('n', lhs, fn, { buffer = buf, nowait = true, silent = true })
+  end
+  for i = 1, math.min(#items, 9) do
+    map(tostring(i), function() finish(i) end)
+  end
+  map('<CR>', function() finish(vim.api.nvim_win_get_cursor(win)[1]) end)
+  map('q', function() finish(nil) end)
+  map('<Esc>', function() finish(nil) end)
+
+  vim.api.nvim_create_autocmd('WinClosed', {
+    pattern = tostring(win),
+    once = true,
+    callback = function() finish(nil) end,
+  })
+end
+
+----------------------------------------------------------------------------
 -- The popup
 ----------------------------------------------------------------------------
 
@@ -556,7 +642,8 @@ function M.close_view()
 end
 
 --- Show the history tree for a session in a floating window.
---- <CR> jumps to the turn under the cursor, q closes.
+--- <CR> jumps to the turn under the cursor, f forks a new agent from it,
+--- q closes.
 ---@param opts table|nil { session }
 function M.show(opts)
   opts = opts or {}
@@ -582,7 +669,7 @@ function M.show(opts)
   ensure_highlights()
   local width = math.min(110, vim.o.columns - 8)
   local lines, hls, rows = M.render(tree, { width = width })
-  local title = ' History  (<CR> jump · q close) '
+  local title = ' History  (<CR> jump · f fork · q close) '
 
   local w = vim.fn.strdisplaywidth(title)
   for _, l in ipairs(lines) do w = math.max(w, vim.fn.strdisplaywidth(l)) end
@@ -648,6 +735,27 @@ function M.show(opts)
       leaf = plan.leaf,
       prompt = plan.prompt,
     })
+  end)
+
+  -- Fork a new agent from the node under the cursor, leaving this agent alone.
+  -- Unlike a jump, the current node is a legitimate target: forking from where
+  -- you are is how you branch off the conversation you are having.
+  map('f', function()
+    local v = M.view
+    if not v then return end
+    local row = v.rows[vim.api.nvim_win_get_cursor(v.win)[1]]
+    if not row or not row.uuid then return end
+    local m = v.tree.meta[row.uuid]
+    local from = { session = v.session, path = v.path, leaf = m.leaf, prompt = m.prompt }
+    M.close_view()
+    -- Prompt on the NEXT tick, out of insert mode.  Closing the float returns
+    -- focus to the agent terminal, whose BufEnter autocmd puts it back into
+    -- insert mode; asking in that same tick leaves the builtin vim.ui.input's
+    -- cmdline prompt unrendered, silently swallowing the keys typed at it.
+    vim.schedule(function()
+      vim.cmd('stopinsert')
+      aiagent.history_fork(from)
+    end)
   end)
 
   vim.api.nvim_create_autocmd('WinClosed', {

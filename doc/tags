@@ -2,6 +2,7 @@
 :AgentClose	aiagent.txt	/*:AgentClose*
 :AgentCloseAll	aiagent.txt	/*:AgentCloseAll*
 :AgentDiff	aiagent.txt	/*:AgentDiff*
+:AgentFork	aiagent.txt	/*:AgentFork*
 :AgentHide	aiagent.txt	/*:AgentHide*
 :AgentInstallSkill	aiagent.txt	/*:AgentInstallSkill*
 :AgentList	aiagent.txt	/*:AgentList*
@@ -38,6 +39,7 @@ aiagent-config-width	aiagent.txt	/*aiagent-config-width*
 aiagent-contents	aiagent.txt	/*aiagent-contents*
 aiagent-diagnostics	aiagent.txt	/*aiagent-diagnostics*
 aiagent-health	aiagent.txt	/*aiagent-health*
+aiagent-history-fork	aiagent.txt	/*aiagent-history-fork*
 aiagent-history-jump	aiagent.txt	/*aiagent-history-jump*
 aiagent-history-tree	aiagent.txt	/*aiagent-history-tree*
 aiagent-idle	aiagent.txt	/*aiagent-idle*

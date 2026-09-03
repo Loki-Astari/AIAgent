@@ -747,9 +747,6 @@ local function create_window_layout()
   end
 end
 
---- Create a new agent
----@param name string Agent name
----@param cwd string|nil Working directory (defaults to current)
 --- Create an agent's terminal buffer and start its job.
 ---@param name string
 ---@param cwd string|nil
@@ -2078,6 +2075,200 @@ function M.history_jump(target)
   vim.cmd("startinsert")
   vim.notify("Jumped to: " .. (target.prompt or target.leaf), vim.log.levels.INFO)
   return true
+end
+
+--- Fork a new agent from a point in another agent's history.
+---
+--- `--fork-session` resumes a session under a NEW id, and Claude Code copies the
+--- walked path into the new transcript (rewriting every entry's sessionId), so
+--- the fork is a genuinely independent session rather than a reference into the
+--- source.  Combined with a leaf pointer it can start from any node in the tree.
+---
+--- The source agent is never stopped.  Its on-disk position does move while the
+--- fork reads the file, so the previous head is restored once the fork has
+--- started; that restore is best-effort by design, because the source agent's
+--- own next turn appends newer entries which supersede any stale pointer anyway.
+---@param target table { session, path, leaf, prompt } the node to fork from
+---@param opts table|nil { name, wtname, source } (prompts interactively when absent)
+function M.history_fork(target, opts)
+  opts = opts or {}
+  local source_name = opts.source or M.current_agent
+  local source = source_name and M.agents[source_name]
+  if not source then
+    vim.notify("No agent to fork from", vim.log.levels.WARN)
+    return
+  end
+  if source.agent_type ~= "claude" then
+    vim.notify("Forking is only supported for Claude agents", vim.log.levels.WARN)
+    return
+  end
+
+  local history = require('aiagent.history')
+
+  --- Everything below runs once the name and worktree choice are known.
+  local function spawn(name, cwd, worktree, git_root, slug)
+    -- Remember where the source stood before its pointer is moved.
+    local restore = history.head(history.parse(target.path))
+
+    local ok, err = history.set_leaf(target.path, target.session, target.leaf, target.prompt)
+    if not ok then
+      vim.notify("Could not set the fork point: " .. (err or "unknown error"),
+        vim.log.levels.ERROR)
+      return
+    end
+
+    local base = (source.command or "claude"):gsub("%s+%-%-resume%s+%S+", "")
+      :gsub("%s+%-%-fork%-session", "")
+    ensure_layout()
+    if not create_agent(name, cwd, {
+          command = base .. " --resume " .. target.session .. " --fork-session",
+        }) then
+      return
+    end
+    M.current_agent = name
+    local agent = M.agents[name]
+    agent.worktree = worktree
+    agent.git_root = git_root
+    agent.slug = slug
+    if target.prompt and target.prompt ~= "" then
+      agent.task = "fork: " .. target.prompt:sub(1, 60)
+    end
+
+    -- Restore the source's pointer once the fork has read the transcript, which
+    -- has happened by the time it has a session file of its own.  Give up after
+    -- a few seconds and restore regardless: waiting longer protects nothing.
+    local tries = 0
+    local function restore_source()
+      tries = tries + 1
+      local forked = M.agents[name]
+      local pid = forked and forked.job_id and vim.fn.jobpid(forked.job_id)
+      local started = false
+      if pid and pid > 0 then
+        local info = _read_json(vim.fn.expand('~/.claude/sessions/' .. pid .. '.json'))
+        started = info ~= nil and info.sessionId ~= nil and info.sessionId ~= target.session
+      end
+      if started or tries > 40 then
+        if restore then
+          pcall(history.set_leaf, target.path, target.session, restore, "")
+        end
+        return
+      end
+      vim.defer_fn(restore_source, 250)
+    end
+    vim.defer_fn(restore_source, 250)
+
+    vim.defer_fn(function()
+      pcall(function() require('aiagent.registry').publish_all() end)
+    end, 200)
+
+    update_header()
+    vim.cmd("startinsert")
+    vim.notify("Forked " .. name .. " from: " .. (target.prompt or target.leaf),
+      vim.log.levels.INFO)
+  end
+
+  --- Ask what to do, then spawn.
+  ---
+  --- Uses the plugin's own menu (see `history.menu`) rather than vim.ui.select:
+  --- a filtering picker is the wrong shape for a three-way choice, and the
+  --- builtin cmdline prompts are easy to miss beside a busy agent terminal.  A
+  --- name is derived up front, so only the rename path prompts for text.
+  local function ask(name)
+    local slug = name:lower():gsub("[^%w]", "-")
+    local where = source.worktree
+      and vim.fn.fnamemodify(source.worktree, ":t") or "this repo"
+    local choices = {
+      'Fork as "' .. name .. '" in ' .. where .. " (shared with " .. source_name .. ")",
+      'Fork as "' .. name .. '" in a new worktree (agent/' .. slug .. ")",
+      "Choose a different name…",
+    }
+    local label = target.prompt or ""
+    if #label > 46 then label = label:sub(1, 45) .. "…" end
+    require('aiagent.history').menu(choices, { title = "Fork from: " .. label }, function(idx)
+      if not idx then
+        vim.notify("Fork cancelled", vim.log.levels.INFO)
+        return
+      end
+      if idx == 1 then
+        spawn(name, source.worktree, source.worktree, source.git_root, source.slug)
+      elseif idx == 2 then
+        local path, root = create_worktree(name)
+        if not path then return end
+        spawn(name, path, path, root, slug)
+      else
+        vim.ui.input({ prompt = "Fork agent name: ", default = name }, function(text)
+          if not text or vim.trim(text) == "" then
+            vim.notify("Fork cancelled", vim.log.levels.INFO)
+            return
+          end
+          text = vim.trim(text)
+          if M.agents[text] then
+            vim.notify("An agent named '" .. text .. "' already exists", vim.log.levels.WARN)
+            return
+          end
+          ask(text)
+        end)
+      end
+    end)
+  end
+
+  -- Explicit arguments (`:AgentFork name [worktree]`) skip the prompts entirely:
+  -- an empty worktree means "share the source agent's".
+  if opts.name and opts.name ~= "" then
+    if opts.wtname == nil then
+      ask(opts.name)
+    elseif opts.wtname == "" then
+      spawn(opts.name, source.worktree, source.worktree, source.git_root, source.slug)
+    else
+      local path, root = create_worktree(opts.wtname)
+      if path then
+        spawn(opts.name, path, path, root, opts.wtname:lower():gsub("[^%w]", "-"))
+      end
+    end
+    return
+  end
+
+  -- Default name: the source plus a free counter, so repeated forks do not clash.
+  local default, n = source_name .. "-fork", 1
+  while M.agents[default] do
+    n = n + 1
+    default = source_name .. "-fork" .. n
+  end
+  ask(default)
+end
+
+--- Fork a new agent from where the current agent stands right now.
+--- To fork from an earlier point, press `f` on it in |:AgentTree|.
+---@param name string|nil Agent name (prompts when absent)
+---@param wtname string|nil Worktree name; "" reuses the source's (prompts when absent)
+function M.fork_here(name, wtname)
+  local agent_name = M.current_agent
+  local agent = agent_name and M.agents[agent_name]
+  if not agent then
+    vim.notify("No agent active", vim.log.levels.WARN)
+    return
+  end
+  local session = M.current_session()
+  if not session then
+    vim.notify("Cannot resolve the current agent's session", vim.log.levels.WARN)
+    return
+  end
+  local history = require('aiagent.history')
+  local path = history.transcript_path(session.id)
+  if not path then
+    vim.notify("No transcript found for session " .. session.id, vim.log.levels.WARN)
+    return
+  end
+  local parsed = history.parse(path)
+  local head = history.head(parsed)
+  if not head then
+    vim.notify("Session transcript is empty", vim.log.levels.WARN)
+    return
+  end
+  local tree = history.build(parsed)
+  local prompt = tree and tree.current and tree.meta[tree.current].prompt or ""
+  M.history_fork({ session = session.id, path = path, leaf = head, prompt = prompt },
+    { name = name, wtname = wtname })
 end
 
 --- Open the prompt-history diff viewer for a session (default: the current

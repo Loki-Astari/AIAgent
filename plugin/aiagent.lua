@@ -35,6 +35,11 @@ vim.api.nvim_create_user_command("AgentChat", function() require("aiagent").prom
 vim.api.nvim_create_user_command("AgentTree", function(o)
   require("aiagent").history_open(o.args ~= "" and o.args or nil)
 end, { nargs = "?" })
+-- Fork a new agent from the current agent's position.  Pick another point to
+-- fork from with `f` in the |AgentTree| popup.
+vim.api.nvim_create_user_command("AgentFork", function(o)
+  require("aiagent").fork_here(o.fargs[1], o.fargs[2])
+end, { nargs = "*" })
 vim.api.nvim_create_user_command("AgentSessions", function(o)
   -- Plain `:AgentSessions` picks the session to continue capturing into;
   -- `:AgentSessions!` loads the chosen session's prompt history into the agent.

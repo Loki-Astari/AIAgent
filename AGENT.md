@@ -371,6 +371,35 @@ The agent's identity (colour, worktree, git root, slug, task, sent files) is car
 across the restart; only the process changes. `agent.command` is stripped of any
 previous `--resume` so repeated jumps do not accumulate flags.
 
+### Forking (`M.history_fork`, `M.fork_here`)
+
+`f` in the tree popup forks a NEW agent from the node under the cursor, leaving the
+source agent running. `--fork-session` resumes under a new session id and Claude
+Code copies the walked path into the new transcript, rewriting every entry's
+`sessionId` — so the fork is a genuinely independent session, not a view into the
+source, and the leaf pointer selects which path gets copied.
+
+The one wrinkle: setting the fork point moves the *source's* recorded position,
+because the pointer lives in the source transcript. So `history_fork` captures
+`history.head()` first and restores it once the fork has started (polling
+`~/.claude/sessions/<pid>.json` for the fork's own session id, giving up after
+~10s and restoring anyway). The restore is best-effort on purpose — the source's
+next turn appends newer entries, and "newest in file order wins" makes any stale
+pointer irrelevant.
+
+Unlike a jump, forking from the CURRENT node is meaningful, so `f` has no no-op
+case. Sharing the source's tree keeps the inherited context's file paths valid,
+while a worktree isolates edits but points that context at the source tree.
+
+The choice is made in `history.menu`, the plugin's own float, and **not** through
+`vim.ui.select`/`vim.ui.input`. Both builtins prompt on the cmdline, which is easy
+to miss next to a busy agent terminal — the fork read as a dead keybinding, and the
+keys typed at the invisible prompt cancelled it. Replacing input with select was no
+better: a user's select handler is often a filtering picker (telescope-ui-select
+adds a text input above the list, where typing filters instead of choosing and <CR>
+on no match cancels silently). A fixed menu with number keys has neither failure
+mode. Every cancel path notifies, so an abandoned fork never looks like a no-op.
+
 ### Non-obvious details
 
 - **The `last-prompt` pointer is not kept up to date.** A resumed session may never
