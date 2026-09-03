@@ -512,3 +512,226 @@ describe("aiagent.registry", function()
     vim.fn.delete(home, "rf")
   end)
 end)
+
+describe("aiagent.history", function()
+  local history = require("aiagent.history")
+  local tmp
+
+  -- A transcript shaped like a real one: three turns, then a rewind to before
+  -- turn 2 that forks a second branch off turn 1.
+  local function write_transcript(leaf)
+    tmp = vim.fn.tempname() .. ".jsonl"
+    local function turn(uuid, parent, prompt, reply, reply_uuid, tool)
+      local lines = {
+        vim.json.encode({
+          type = "user", uuid = uuid, parentUuid = parent, isSidechain = false,
+          origin = { kind = "human" }, timestamp = "2026-09-01T18:34:12.051Z",
+          message = { role = "user", content = { { type = "text", text = prompt } } },
+        }),
+        vim.json.encode({
+          type = "assistant", uuid = reply_uuid, parentUuid = uuid,
+          timestamp = "2026-09-01T18:34:20.000Z",
+          message = { role = "assistant", content = tool
+            and { { type = "tool_use", name = "Edit", input = { file_path = "/repo/init.lua" } } }
+            or { { type = "text", text = reply } } },
+        }),
+      }
+      return lines
+    end
+    local out = {}
+    vim.list_extend(out, turn("u1", vim.NIL, "first prompt", "alpha", "a1"))
+    vim.list_extend(out, turn("u2", "a1", "second prompt", "beta", "a2"))
+    vim.list_extend(out, turn("u3", "a2", "third prompt", "gamma", "a3"))
+    -- The fork: a turn whose parent is turn 1's reply, not the newest entry.
+    vim.list_extend(out, turn("u4", "a1", "branched prompt", nil, "a4", true))
+    table.insert(out, vim.json.encode({
+      type = "last-prompt", lastPrompt = "x", leafUuid = leaf, sessionId = "s1" }))
+    vim.fn.writefile(out, tmp)
+    return tmp
+  end
+
+  after_each(function()
+    if tmp then vim.fn.delete(tmp) end
+  end)
+
+  it("builds a tree with a real fork and marks the active path", function()
+    local tree = history.build(history.parse(write_transcript("a3")))
+
+    assert.equals(4, #tree.turns)
+    -- Turn 1 has two children: the original line and the rewound branch.
+    assert.equals(2, #tree.children["u1"])
+    -- The pointer names turn 3's reply, so 1-2-3 are active and the fork is not.
+    assert.is_true(tree.active["u1"])
+    assert.is_true(tree.active["u3"])
+    assert.is_nil(tree.active["u4"])
+    -- A turn's jump target is the end of its own reply, not the prompt entry.
+    assert.equals("a2", tree.meta["u2"].leaf)
+    -- "Where you are" is the turn OWNING the recorded leaf.
+    assert.equals("u3", tree.current)
+    -- Tool traffic is summarised onto the turn.
+    assert.equals(1, tree.meta["u4"].tools)
+    assert.same({ "init.lua" }, tree.meta["u4"].files)
+  end)
+
+  it("follows the leaf pointer onto the other branch", function()
+    local tree = history.build(history.parse(write_transcript("a4")))
+    assert.is_true(tree.active["u4"])
+    assert.is_nil(tree.active["u2"])
+    assert.is_nil(tree.active["u3"])
+  end)
+
+  it("renders the trunk in a fixed gutter and only indents forks", function()
+    local tree = history.build(history.parse(write_transcript("a3")))
+    local lines, hls, rows = history.render(tree, { width = 80 })
+
+    local function row_for(uuid)
+      for i, r in ipairs(rows) do if r.uuid == uuid then return i end end
+    end
+    -- Trunk turns all start at column 0 however deep they are: depth must not
+    -- indent, or a long linear session walks off the right edge.
+    for _, uuid in ipairs({ "u1", "u2", "u3" }) do
+      -- Match the whole marker, not a character class: Lua patterns are byte
+      -- based, so "[●▶]" is a set of the five bytes those two glyphs are made
+      -- of and would match one byte of either.
+      local mark = lines[row_for(uuid)]:match("^(%S+) ")
+      assert.is_true(mark == "●" or mark == "▶")
+    end
+    -- The rewound branch is indented and drawn with the off-path marker.
+    assert.is_truthy(lines[row_for("u4")]:match("^│ ○ "))
+    -- Current position marker sits on the active leaf turn.
+    assert.is_truthy(lines[row_for("u3")]:match("^▶ "))
+    -- Rows that are graph connectors map to no turn.
+    assert.is_nil(rows[row_for("u4") - 1].uuid)
+    -- Highlights are byte offsets and land on the marker.
+    local hit
+    for _, h in ipairs(hls) do
+      if h.line == row_for("u3") - 1 and h.group == "AIAgentTreeHere" then hit = h end
+    end
+    assert.is_truthy(hit)
+    assert.equals("▶", lines[row_for("u3")]:sub(hit.col + 1, hit.end_col))
+  end)
+
+  it("plans a no-op for the current position and a jump for anything else", function()
+    local tree = history.build(history.parse(write_transcript("a3")))
+
+    assert.equals("noop", history.plan(tree, "u3").kind)
+
+    local back = history.plan(tree, "u2")
+    assert.equals("jump", back.kind)
+    assert.equals("a2", back.leaf)
+    assert.is_true(back.on_path)
+
+    local across = history.plan(tree, "u4")
+    assert.equals("jump", across.kind)
+    assert.equals("a4", across.leaf)
+    assert.is_false(across.on_path)
+
+    assert.equals("none", history.plan(tree, "nope").kind)
+  end)
+
+  it("treats the turn owning the pointer as the current one, mid-turn or not", function()
+    -- Claude Code writes the pointer when a prompt is SUBMITTED, so it names an
+    -- entry part-way through the turn, never the turn's last entry.  Selecting
+    -- the current node must still be a no-op rather than a pointless restart.
+    local tree = history.build(history.parse(write_transcript("u3")))
+    assert.equals("u3", tree.current)
+    assert.equals("noop", history.plan(tree, "u3").kind)
+
+    -- And the marker follows the same rule, even when the current turn still
+    -- has children (which is exactly the state right after a jump).
+    local jumped = history.build(history.parse(write_transcript("a1")))
+    assert.equals("u1", jumped.current)
+    assert.equals("noop", history.plan(jumped, "u1").kind)
+    local lines, _, rows = history.render(jumped, { width = 80 })
+    for i, r in ipairs(rows) do
+      if r.uuid == "u1" then assert.is_truthy(lines[i]:match("^▶ ")) end
+    end
+  end)
+
+  it("set_leaf appends a pointer that build() then follows", function()
+    local path = write_transcript("a3")
+    -- a4 is a leaf (the fork's tip), so the pointer can name it directly.
+    assert.is_true(history.set_leaf(path, "s1", "a4", "branched prompt"))
+
+    local tree = history.build(history.parse(path))
+    assert.is_true(tree.active["u4"])
+    assert.is_nil(tree.active["u3"])
+
+    -- The original entries are untouched: moving never rewrites history.
+    local raw = table.concat(vim.fn.readfile(path), "\n")
+    assert.is_truthy(raw:match('"uuid":"u3"'))
+
+    -- No anchor was needed, so nothing but the pointer was appended.
+    local last = vim.fn.readfile(path)
+    assert.is_truthy(last[#last]:match('"type":"last%-prompt"'))
+    assert.is_truthy(last[#last]:match('"leafUuid":"a4"'))
+  end)
+
+  it("prefers the newest entry when the pointer has gone stale", function()
+    -- A resumed session does not necessarily write a `last-prompt` of its own,
+    -- so after a jump the newest pointer stays the one WE wrote at the branch
+    -- point.  Trusting it would mark the branch point as "here" and render the
+    -- turns just added as an abandoned branch.
+    local path = write_transcript("a1")
+
+    -- Two turns appended after the pointer, branching from turn 1.
+    local extra_lines = {}
+    local function add(uuid, parent, prompt, reply)
+      table.insert(extra_lines, vim.json.encode({
+        type = "user", uuid = uuid, parentUuid = parent, isSidechain = false,
+        origin = { kind = "human" }, timestamp = "2026-09-03T09:00:00.000Z",
+        message = { role = "user", content = { { type = "text", text = prompt } } },
+      }))
+      table.insert(extra_lines, vim.json.encode({
+        type = "assistant", uuid = reply, parentUuid = uuid,
+        timestamp = "2026-09-03T09:00:05.000Z",
+        message = { role = "assistant", content = { { type = "text", text = "ok" } } },
+      }))
+    end
+    add("u5", "a1", "new branch first", "a5")
+    add("u6", "a5", "new branch second", "a6")
+    vim.fn.writefile(extra_lines, path, "a")
+
+    local tree = history.build(history.parse(path))
+    assert.equals("u6", tree.current)
+    assert.is_true(tree.active["u5"])
+    assert.is_true(tree.active["u1"])
+    -- The branch that was rewound away stays off the path.
+    assert.is_nil(tree.active["u2"])
+    assert.is_nil(tree.active["u3"])
+    -- And selecting the tip is the no-op, not the branch point.
+    assert.equals("noop", history.plan(tree, "u6").kind)
+    assert.equals("jump", history.plan(tree, "u1").kind)
+  end)
+
+  it("anchors a rewind so the pointer names a real leaf", function()
+    -- Resume only honours a pointer that names a LEAF; at a node with children
+    -- it silently resumes the newest leaf instead.  Every rewind targets such a
+    -- node, so set_leaf must give it a synthetic child to point at.
+    local path = write_transcript("a3")
+    assert.is_true(history.set_leaf(path, "s1", "a1", "first prompt"))
+
+    local parsed = history.parse(path)
+    -- The anchor is a child of the target, and the pointer names the anchor.
+    local anchor
+    for uuid, entry in pairs(parsed.nodes) do
+      if entry.parentUuid == "a1" and entry.type == "system" then anchor = uuid end
+    end
+    assert.is_truthy(anchor)
+    assert.equals(anchor, parsed.leaf)
+
+    -- The anchor is a leaf, so a resumed session will accept the pointer.
+    local children = 0
+    for _, entry in pairs(parsed.nodes) do
+      if entry.parentUuid == anchor then children = children + 1 end
+    end
+    assert.equals(0, children)
+
+    -- The target turn is now where we are, and both old branches survive.
+    local tree = history.build(parsed)
+    assert.equals("u1", tree.current)
+    assert.is_nil(tree.active["u2"])
+    assert.equals(2, #tree.children["u1"])
+  end)
+
+end)

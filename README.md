@@ -150,6 +150,7 @@ When in the agent terminal:
 | `<C-\><C-v>` | terminal | Paste the unnamed register `"` into the terminal input |
 | `<C-\><C-d>` | terminal | Open the prompt-history diff viewer (`:AgentDiff`) |
 | `<C-\><C-l>` | terminal | List agents in all Neovim instances (`:AgentList!`) |
+| `<C-\><C-t>` | terminal | Open the session history tree (`:AgentTree`) |
 | `i` | scroll | Exit scroll mode and resume terminal interaction |
 | `<C-\><C-n>` | scroll | Exit scroll mode and return to your previous window |
 
@@ -161,6 +162,35 @@ Press `<C-\><C-s>` to enter scroll mode, which lets you browse output history us
 - **Re-entry**: restores the cursor position from your last scroll session
 
 Press `i` to return to terminal input, or `<C-\><C-n>` to jump back to your editing window.
+
+### Session history tree
+
+A Claude Code session is a tree, not a straight line: `/rewind` starts a sibling
+branch rather than discarding the turns you left, and every branch lives on in the
+same transcript. `:AgentTree` (or `<C-\><C-t>`) draws that tree in a popup and lets
+you jump anywhere in it.
+
+```
+ ● We just added the command "AgentList!" …          Tue 10:34  17 tools
+ ├─╮
+ │ ○ actually split it into two commits              Tue 10:40  8 files
+ │    ╰ tip · 2 turns
+ │
+ ● reload the module and reopen the agent            Tue 10:36  6 tools
+ ● Run the rewind experiment and show me what gets…  Wed 14:31  36 tools
+ ▶ That looks good. I want the window to be a pop up   15:16  history.lua
+```
+
+Nodes are the prompts you typed, summarised by what answered them. `●` is on your
+current path, `○` on a branch you left, `▶` is where you are. Depth never indents —
+only forks do — so a long session stays in one column. Every turn gets a row: the
+popup opens tall enough for the whole history (up to 60 rows, or 80% of the screen
+when it is shorter) and scrolls back into the past from where you are. `<CR>` jumps,
+`q` closes.
+
+Jumping stops the agent, appends a position pointer to the transcript, and restarts
+it with `--resume`, so the agent process restarts but nothing in your history is
+destroyed — every branch keeps its tip and a jump is always reversible.
 
 ### Idle attention alerts
 
@@ -199,6 +229,7 @@ vim.keymap.set("v", "<leader>as", "<cmd>AgentSendSelection<cr>",    { desc = "Se
 vim.keymap.set("n", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",  { desc = "Send LSP diagnostics to agent" })
 vim.keymap.set("v", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",  { desc = "Send LSP diagnostics (selection) to agent" })
 vim.keymap.set("n", "<leader>al", "<cmd>AgentList!<cr>",          { desc = "List agents in all Neovim instances" })
+vim.keymap.set("n", "<leader>ag", "<cmd>AgentTree<cr>",           { desc = "Session history tree" })
 ```
 
 ## Buffer Context Integration

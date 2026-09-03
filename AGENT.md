@@ -45,6 +45,7 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 - `lua/aiagent/init.lua` - Main Lua module with all plugin logic
 - `lua/aiagent/prompthistory.lua` - Prompt-history diff viewer (see [Prompt History](#prompt-history))
 - `lua/aiagent/registry.lua` - Cross-instance agent registry and its list viewer (see [Agent Registry](#agent-registry))
+- `lua/aiagent/history.lua` - Session history tree popup and node jumping (see [History Tree](#history-tree))
 - `lua/aiagent/health.lua` - Health check implementation (`:checkhealth aiagent`)
 - `hooks/prompt_snapshot.sh` - Claude Code `pre`/`post` hooks that capture per-prompt git tree snapshots
 - `hooks/prompt_history_inspect.sh` - Terminal tool to list/dump captured sessions
@@ -318,6 +319,93 @@ directly: **jobstart raises E475 on a non-executable argv[0]**, which a missing
 tested without a window. Highlight ranges are **byte** offsets (for extmarks)
 while column padding is computed in **display** width — the `▶` marker is three
 bytes and one cell, so the two must not be conflated (a test asserts both).
+
+## History Tree
+
+`:AgentTree` / `<C-\><C-t>` shows the current session's transcript as the tree it
+actually is, and jumps to any node in it.
+
+### Why there is a tree at all
+
+A Claude Code transcript (`~/.claude/projects/<slug>/<session>.jsonl`) is
+append-only JSONL whose entries link by `uuid`/`parentUuid`. `/rewind` does **not**
+truncate it — the abandoned turns stay byte-identical and the next prompt is
+appended with its `parentUuid` pointing back at the chosen node. One file therefore
+holds every branch ever explored in that session.
+
+The active position is a separate entry, and **the last one in the file wins**:
+
+```json
+{"type":"last-prompt","lastPrompt":"…","leafUuid":"<uuid>","sessionId":"…"}
+```
+
+### Jumping
+
+`M.history_jump(target)` in `init.lua` is the whole mechanism:
+
+1. stop the agent's job (`cleanup_agent`)
+2. append a `last-prompt` pointer naming the target entry (`history.set_leaf`)
+3. relaunch with `<command> --resume <session>` (`create_agent`'s `cmd_override`)
+
+**Order is not negotiable.** A live session writes its own `last-prompt` at the end
+of every turn, so a pointer written underneath a running agent is clobbered — which
+is also why the process must restart rather than being repointed in place.
+
+**A pointer is only honoured when it names a LEAF.** Resume picks among the
+transcript's leaves; a pointer at a node that still has children is *silently*
+ignored and the newest leaf is resumed instead. That is every rewind — so a jump
+back up the current path appeared to work and then continued the old conversation
+linearly, producing no branch at all. `history.set_leaf` therefore appends a
+synthetic anchor entry (a childless `stop_hook_summary` system entry cloned from
+the same transcript, so its shape matches the writing version) as a child of the
+target and points at that. The target becomes a genuine fork point, the resumed
+session reads the path through it, and its new turns hang off the anchor as a real
+branch. Anchors are invisible in the tree because only typed prompts are nodes.
+
+One mechanism serves both directions: repointing at an ancestor *is* a rewind, so
+on-path and off-path jumps share a code path. `/rewind` is deliberately not used —
+it is an interactive dialog with no programmatic entry point, and driving it would
+mean sending blind keystrokes into the terminal.
+
+The agent's identity (colour, worktree, git root, slug, task, sent files) is carried
+across the restart; only the process changes. `agent.command` is stripped of any
+previous `--resume` so repeated jumps do not accumulate flags.
+
+### Non-obvious details
+
+- **The `last-prompt` pointer is not kept up to date.** A resumed session may never
+  write one, so after a jump the newest pointer stays the one the plugin wrote at
+  the branch point. `build()` therefore takes whichever is newer in *file order*:
+  the pointer when nothing follows it (a jump not yet used), else the last entry in
+  the file, which necessarily belongs to the branch in use. `parse()` returns
+  `leaf_pos` for exactly this comparison. Trusting the pointer alone marks the
+  branch point as "here" and renders the turns just added as an abandoned branch.
+- **`parentUuid: null` decodes to `vim.NIL`, which is truthy in Lua.** A plain
+  `if parent then` walks off the top of the tree. `parent_of()` normalises it, and
+  root entries are keyed under a `ROOT` sentinel because nil cannot be a table key.
+- **Nodes are typed prompts only.** `origin.kind == "human"` is authoritative where
+  present; older transcripts fall back to the envelope sniffing `registry.human_text()`
+  uses. A tree of every assistant and tool message would be unnavigable.
+- **A turn's jump target is the end of its reply, not its prompt entry** — selecting
+  a turn means "the conversation through the end of this turn".
+- **Depth must not indent.** Rendering a linear session with one indent per turn
+  walks off the right edge by turn 15. Only forks indent; the active branch always
+  continues the trunk, as `git log --graph` does.
+- **Nothing is rolled up.** An earlier version folded long branchless runs into a
+  `⋯` row, which made the popup five lines tall on an 18-turn session and hid the
+  history the viewer exists to show. Every turn gets a row; the window is sized to
+  the content (cap 60 rows, or 80% of `vim.o.lines` when the screen is shorter) and
+  scrolls. The cursor opens on the current turn parked at the bottom (`zb`), so
+  scrolling up walks into the past.
+- `M.render()` is pure and returns `(lines, highlights, rows)` so it is unit tested
+  without a window. Highlight columns are **byte** offsets while padding is computed
+  in **display** width — and `[●▶]` in a Lua pattern is a *byte* class, not a set of
+  two glyphs (a test documents this).
+- The transcript is located by globbing `~/.claude/projects/*/<session>.jsonl` rather
+  than deriving the slug: session ids are unique, slug escaping is Claude Code's
+  business.
+- These entry types are undocumented internals. Everything degrades to "no tree
+  available" rather than throwing.
 
 ## GitHub MCP Setup
 

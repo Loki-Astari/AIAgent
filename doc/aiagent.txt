@@ -21,7 +21,8 @@ CONTENTS                                                    *aiagent-contents*
  12. Lualine Integration ........ |aiagent-lualine|
  13. Prompt History ............ |aiagent-prompt-history|
  14. Agent Registry ........... |aiagent-registry|
- 15. Health check .............. |aiagent-health|
+ 15. History Tree .............. |aiagent-history-tree|
+ 16. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -80,7 +81,7 @@ Full example: >lua
     mcp_max_width       = 35,
     mcp_scroll          = true,
     colors = { "red", "blue", "orange", "green", "yellow",
-               "magenta", "cyan", "purple" },
+               "pink", "cyan", "purple" },
     known_agents = {
       claude  = "claude",
       aider   = "aider",
@@ -147,7 +148,9 @@ idle_notify ~
                                                  *aiagent-config-colors*
 colors ~
   Type: string[]
-  Default: `{ "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" }`
+  Default: `{ "red", "blue", "orange", "green", "yellow", "pink", "cyan", "purple" }`
+  Names must be ones Claude Code accepts: the plugin sends `/color <name>`
+  to the agent at startup and an unknown name is rejected.
   Color cycle used when opening new agents. Each new agent gets the next
   color. Colors are sent to the agent via its `/color` command.
 
@@ -356,6 +359,7 @@ Terminal mode ~
   <C-\><C-d>    Open the prompt-history diff viewer (see |:AgentDiff|)
   <C-\><C-r>    Search input history (agent-specific)
   <C-\><C-l>    List agents in all Neovim instances (see |:AgentList|)
+  <C-\><C-t>    Open the session history tree (see |:AgentTree|)
 
 Scroll mode (normal mode inside terminal buffer) ~
   i             Exit scroll mode and resume terminal input
@@ -999,7 +1003,78 @@ telling you which directory and Neovim pid the agent belongs to; set
 |aiagent-config-focus_cmd| to teach it your terminal.
 
 ==============================================================================
-15. HEALTH CHECK                                           *aiagent-health*
+15. HISTORY TREE                                     *aiagent-history-tree*
+
+                                                                  *:AgentTree*
+:AgentTree [session]    Show the session's history as a tree in a popup and
+                        jump to any point in it. Defaults to the current
+                        agent's session.
+
+A Claude Code session is a TREE, not a straight line. `/rewind` does not throw
+the abandoned turns away — it starts a sibling branch, and every branch stays
+in the same transcript file. |:AgentTree| draws that tree and lets you move
+between its branches: >
+
+   ● We just added the command "AgentList!" …          Tue 10:34  17 tools
+   ├─╮
+   │ ○ actually split it into two commits              Tue 10:40  8 files
+   │    ╰ tip · 2 turns
+   │
+   ● reload the module and reopen the agent            Tue 10:36  6 tools
+   ● Run the rewind experiment and show me what gets…  Wed 14:31  36 tools
+   ▶ That looks good. I want the window to be a pop up   15:16  history.lua
+<
+Nodes are the prompts YOU typed; each row summarises the assistant and tool
+traffic that answered it. `●` is a turn on the path you are currently on, `○`
+one on a branch you have left, and `▶` is where you are now. Depth never
+indents — only forks do — so a long linear session stays in one column, the
+way `git log --graph` keeps its trunk in a fixed gutter.
+
+Every turn gets its own row — nothing is rolled up. The popup opens as tall as
+the history needs, capped at 60 rows, or at 80% of the screen when the screen
+cannot spare 60. The cursor starts on your current position at the bottom of
+the viewport, so a longer history scrolls back into the past above it.
+
+Press <CR> to jump to the turn under the cursor, `q` to close.
+
+HOW JUMPING WORKS ~                                  *aiagent-history-jump*
+
+Claude Code records its position in the transcript as an entry of the form: >
+
+   {"type":"last-prompt","lastPrompt":"…","leafUuid":"<uuid>","sessionId":"…"}
+<
+The LAST such entry wins. Jumping therefore means: stop the agent, append a
+pointer naming the target entry, and restart with `--resume`. Context is then
+assembled by walking from that entry to the root.
+
+The same mechanism serves both directions. Repointing at an ancestor IS a
+rewind, so no distinction is made between a turn on the current path and one
+on a branch that was rewound away — which also avoids depending on `/rewind`,
+an interactive dialog with no programmatic entry point.
+
+A pointer is only honoured when it names a LEAF of the transcript: at a node
+that still has children it is silently ignored and the newest leaf is resumed
+instead. Since that describes every rewind, a synthetic anchor entry is
+appended below the target first and the pointer names that, which is what makes
+the target a real fork point.
+
+Two consequences worth knowing:
+
+  - The agent process necessarily RESTARTS. The job must be stopped before the
+    pointer is written, because a live session writes its own `last-prompt` at
+    the end of every turn and would clobber it.
+  - Nothing is destroyed. Every branch keeps its own tip, so a jump is always
+    reversible by jumping back.
+
+Selecting the turn you are already on is a no-op. The jump is only implemented
+for Claude agents; other agent types report that and do nothing.
+
+These transcript entry types are undocumented internals of Claude Code. If a
+future version changes them the tree reports that it cannot be read rather
+than guessing.
+
+==============================================================================
+16. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 
