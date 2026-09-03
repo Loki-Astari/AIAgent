@@ -4,6 +4,8 @@ local M = {}
 -- Default configuration
 M.config = {
   width = 0.4,         -- Width as percentage (0-1) or columns (>1)
+  auto_resize = true,  -- Re-apply the agent column's screen share when the terminal is resized
+  min_width = 20,      -- Columns the agent column (and the rest of the layout) may never drop below
   default_agent = "claude", -- Symbolic agent name to use on startup
   auto_send_context = false, -- Automatically send new buffer context when entering terminal
   agent_startup_delay = 1500, -- Milliseconds to wait before sending /color command on startup
@@ -186,6 +188,8 @@ local function force_cleanup()
   M.current_agent = nil
   M._hidden_win_width = nil
   M._hidden_win_height = nil
+  M._hidden_columns = nil
+  M._width_ratio = nil
 
   -- Close windows
   if M.win ~= nil and vim.api.nvim_win_is_valid(M.win) then
@@ -279,6 +283,29 @@ function M.setup(opts)
   -- reloading the module (`:lua package.loaded['aiagent'] = nil`) never
   -- accumulates duplicate handlers.
   local augroup = vim.api.nvim_create_augroup("AIAgent", { clear = true })
+
+  -- Keep the agent column proportional across terminal resizes (e.g. unplugging
+  -- an external monitor). VimResized re-applies the remembered share; WinResized
+  -- records the user's own adjustments, and is ignored when the screen width
+  -- changed because that resize is Neovim's redistribution, not the user's.
+  if M.config.auto_resize then
+    M._last_columns = vim.o.columns
+
+    vim.api.nvim_create_autocmd("VimResized", {
+      group = augroup,
+      callback = function() M.resize() end,
+      desc = "Keep the AIAgent column proportional when the terminal is resized",
+    })
+
+    vim.api.nvim_create_autocmd("WinResized", {
+      group = augroup,
+      callback = function()
+        if vim.o.columns ~= M._last_columns then return end
+        M._record_width_ratio()
+      end,
+      desc = "Remember the AIAgent column's share of the screen after a manual resize",
+    })
+  end
 
   -- Re-derive tab highlight groups when the colorscheme changes.
   -- (Initial setup happens lazily inside update_winbar(), after bufferline has loaded.)
@@ -458,17 +485,82 @@ function M.setup(opts)
   end
 end
 
+--- Clamp a desired agent-column width so neither it nor the rest of the layout
+--- is squeezed out of existence. On a very narrow screen the floor drops to half
+--- the screen rather than making the clamp unsatisfiable.
+---@param width number
+---@return number
+local function clamp_width(width)
+  local floor = math.min(M.config.min_width, math.max(1, math.floor(vim.o.columns / 2)))
+  return math.max(floor, math.min(math.floor(width), vim.o.columns - floor))
+end
+
 --- Calculate the window width based on config
 ---@return number
 local function get_width()
   local width = M.config.width
   if width > 0 and width <= 1 then
     -- Percentage of total width
-    return math.floor(vim.o.columns * width)
+    return clamp_width(vim.o.columns * width)
   else
     -- Absolute column count
-    return math.floor(width)
+    return clamp_width(width)
   end
+end
+
+-- Proportional resize state.
+--
+-- M._width_ratio is the agent column's share of the screen. It is seeded from
+-- config.width when the layout is created and re-recorded whenever the user
+-- resizes the pane by hand, so a terminal resize restores the proportion
+-- actually in use rather than the configured default.
+--
+-- M._last_columns lets the WinResized handler tell a manual resize (screen width
+-- unchanged) from Neovim's own redistribution of windows during a terminal
+-- resize (screen width changed) — only the former should update the ratio.
+--
+-- applying_resize suppresses recording while we are setting the width
+-- ourselves, so our own rounding is never fed back into the ratio.
+M._width_ratio  = nil
+M._last_columns = nil
+local applying_resize = false
+
+--- Record the agent column's current share of the screen.
+--- On M rather than a local: setup() is defined earlier in the file and its
+--- WinResized callback has to reach it.
+function M._record_width_ratio()
+  if applying_resize then return end
+  if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+  local w = vim.api.nvim_win_get_width(M.win)
+  if vim.o.columns > 0 and w > 0 then
+    M._width_ratio = w / vim.o.columns
+  end
+end
+
+--- Re-apply the remembered proportion to the current screen size.
+--- Safe to call when no agent window is open (does nothing).
+function M.resize()
+  M._last_columns = vim.o.columns
+  if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+
+  local ratio = M._width_ratio
+  if not ratio then
+    ratio = get_width() / math.max(1, vim.o.columns)
+    M._width_ratio = ratio
+  end
+
+  applying_resize = true
+  pcall(vim.api.nvim_win_set_width, M.win, clamp_width(vim.o.columns * ratio + 0.5))
+  -- The header has winfixheight, but a shrinking screen can still squeeze it;
+  -- restore it to exactly the number of lines it holds.
+  if M.header_win and vim.api.nvim_win_is_valid(M.header_win)
+      and M.header_buf and vim.api.nvim_buf_is_valid(M.header_buf) then
+    local lines = vim.api.nvim_buf_line_count(M.header_buf)
+    pcall(vim.api.nvim_win_set_height, M.header_win, lines)
+  end
+  -- Released on the next tick: WinResized for our own set_width fires first and
+  -- must still see the guard set.
+  vim.schedule(function() applying_resize = false end)
 end
 
 --- Get the CLI executable for the current agent type
@@ -743,15 +835,25 @@ function create_window_layout()
   vim.api.nvim_set_option_value("spell",          false, { win = M.win })
   vim.api.nvim_set_option_value("colorcolumn",    "",    { win = M.win })
 
-  -- Restore exact dimensions saved by hide() to prevent terminal reflow
+  -- Restore exact dimensions saved by hide() to prevent terminal reflow.
+  -- If the screen changed width while hidden, the saved width is stale — scale
+  -- it to keep the same share of the screen instead.
   if M._hidden_win_width then
-    vim.api.nvim_win_set_width(M.win, M._hidden_win_width)
+    local width = M._hidden_win_width
+    if M._hidden_columns and M._hidden_columns > 0 and M._hidden_columns ~= vim.o.columns then
+      width = vim.o.columns * (width / M._hidden_columns)
+    end
+    vim.api.nvim_win_set_width(M.win, clamp_width(width))
     M._hidden_win_width = nil
+    M._hidden_columns = nil
   end
   if M._hidden_win_height then
-    vim.api.nvim_win_set_height(M.win, M._hidden_win_height)
+    vim.api.nvim_win_set_height(M.win, math.min(M._hidden_win_height, vim.o.lines))
     M._hidden_win_height = nil
   end
+
+  M._last_columns = vim.o.columns
+  M._record_width_ratio()
 end
 
 --- Create an agent's terminal buffer and start its job.
@@ -1707,6 +1809,7 @@ function M.hide()
   if M.win and vim.api.nvim_win_is_valid(M.win) then
     M._hidden_win_width = vim.api.nvim_win_get_width(M.win)
     M._hidden_win_height = vim.api.nvim_win_get_height(M.win)
+    M._hidden_columns = vim.o.columns
     pcall(vim.api.nvim_win_close, M.win, true)
     M.win = nil
   end

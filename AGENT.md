@@ -104,6 +104,31 @@ Key implementation details in `M.send_diagnostics(agent_name, line1, line2)`:
 - Terminal jobs require both `chanclose` and `jobstop` for reliable cleanup
 - Window options are set via `nvim_set_option_value` with scope parameters
 
+## Proportional Resize
+
+Unplugging an external monitor shrinks the terminal, and Neovim's own
+redistribution leaves the agent column an arbitrary size. `config.auto_resize`
+(default on) restores its *share* of the screen instead.
+
+- `M._width_ratio` is the fraction actually in use, not `config.width`: seeded
+  from the config when the layout is built, then re-recorded on `WinResized` so
+  a split the user dragged wider keeps its new proportion. `VimResized` calls
+  `M.resize()`, which re-applies it.
+- **`WinResized` must ignore resizes that happen while the screen width is
+  changing** — those are Neovim redistributing windows, not the user. Hence
+  `M._last_columns`: record only when `vim.o.columns` still matches it.
+- `M.resize()` guards its own `nvim_win_set_width` with `applying_resize`,
+  released via `vim.schedule` because the `WinResized` it provokes fires after
+  the call returns. Without it, rounding feeds back and the ratio drifts on
+  every resize.
+- `clamp_width()` keeps both the agent column and the rest of the layout at
+  `config.min_width`; when the screen is too narrow for both, the floor drops to
+  half the screen so the clamp stays satisfiable.
+- `hide()` records `M._hidden_columns` alongside the saved width. A resize while
+  hidden makes the saved absolute width meaningless, so the restore in
+  `create_window_layout` scales it by the screen-width change.
+- `close_all` clears the ratio, so a full teardown returns to `config.width`.
+
 ## Git Worktree Support
 
 Worktrees are **persistent** — they are not removed when an agent is closed or Neovim exits.

@@ -938,3 +938,71 @@ describe("aiagent._base_command", function()
     assert.equals("claude --verbose", base({ command = "claude --verbose" }))
   end)
 end)
+
+describe("aiagent proportional resize", function()
+  local win
+
+  before_each(function()
+    aiagent.close_all()
+    aiagent.setup({})
+    vim.o.columns = 200
+    vim.cmd("botright vsplit")
+    win = vim.api.nvim_get_current_win()
+    aiagent.win = win
+    vim.api.nvim_win_set_width(win, 80)   -- 40% of 200
+    aiagent._last_columns = vim.o.columns
+    vim.wait(20)                          -- let a previous test's resize guard clear
+    aiagent._record_width_ratio()
+  end)
+
+  after_each(function()
+    aiagent.win = nil
+    pcall(vim.api.nvim_win_close, win, true)
+    vim.o.columns = 200
+  end)
+
+  it("records the pane's share of the screen", function()
+    assert.is_true(math.abs(aiagent._width_ratio - 0.4) < 0.001)
+  end)
+
+  it("keeps the same share when the screen shrinks and grows back", function()
+    vim.o.columns = 100
+    aiagent.resize()
+    assert.equals(40, vim.api.nvim_win_get_width(win))
+
+    vim.o.columns = 200
+    aiagent.resize()
+    assert.equals(80, vim.api.nvim_win_get_width(win))
+  end)
+
+  it("honours a manual resize on the next screen resize", function()
+    vim.api.nvim_win_set_width(win, 120)  -- user drags it to 60%
+    aiagent._record_width_ratio()
+    vim.o.columns = 100
+    aiagent.resize()
+    assert.equals(60, vim.api.nvim_win_get_width(win))
+  end)
+
+  it("ignores width changes made while the screen width is changing", function()
+    -- Neovim redistributes windows itself during a terminal resize; that must
+    -- not be mistaken for the user re-sizing the pane.
+    vim.wait(20)                          -- flush the queued WinResized events
+    local ratio = aiagent._width_ratio
+    vim.o.columns = 100
+    vim.api.nvim_win_set_width(win, 90)
+    vim.api.nvim_exec_autocmds("WinResized", {})
+    assert.equals(ratio, aiagent._width_ratio)
+  end)
+
+  it("leaves room for the rest of the layout on a narrow screen", function()
+    vim.o.columns = 30
+    aiagent.resize()
+    local w = vim.api.nvim_win_get_width(win)
+    assert.is_true(w >= 15 and w <= 15)   -- floor drops to half a 30-column screen
+  end)
+
+  it("does nothing when no agent window is open", function()
+    aiagent.win = nil
+    assert.has_no.errors(function() aiagent.resize() end)
+  end)
+end)

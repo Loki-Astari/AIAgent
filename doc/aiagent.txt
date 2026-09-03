@@ -72,6 +72,8 @@ Minimal setup (uses all defaults): >lua
 Full example: >lua
   require('aiagent').setup({
     width               = 0.4,
+    auto_resize         = true,
+    min_width           = 20,
     default_agent       = "claude",
     auto_send_context   = false,
     agent_startup_delay = 1500,
@@ -101,6 +103,25 @@ width ~
   Width of the terminal split.
   - 0 < width <= 1  →  fraction of total editor width
   - width > 1       →  absolute column count
+
+                                               *aiagent-config-auto_resize*
+auto_resize ~
+  Type: boolean  Default: `true`
+  Keep the agent column's share of the screen when the terminal itself is
+  resized — e.g. after unplugging an external monitor. On |VimResized| the
+  pane is set back to the same fraction of the (new) screen width it had
+  before, clamped by |aiagent-config-min_width|.
+
+  The fraction tracked is the one actually in use, not |aiagent-config-width|:
+  if you drag the split to a different size, that new share is what is
+  restored. Set to `false` to leave resizing entirely to Neovim.
+
+                                                 *aiagent-config-min_width*
+min_width ~
+  Type: number  Default: `20`
+  Minimum columns for the agent column, and the minimum left for the rest
+  of the layout beside it. On a screen too narrow to satisfy both, the
+  floor drops to half the screen.
 
                                               *aiagent-config-default_agent*
 default_agent ~
@@ -405,6 +426,13 @@ toggle({name})
 hide()
   Programmatic equivalent of |:AgentHide|. Closes the agent window and
   header while leaving the agent job and buffer running.
+
+                                                   *aiagent.resize()*
+resize()
+  Re-apply the agent column's remembered share of the screen to the
+  current screen size. Called automatically on |VimResized| when
+  |aiagent-config-auto_resize| is on; call it by hand after changing
+  'columns' yourself. Does nothing when the agent window is closed.
 
                                                    *aiagent.switch()*
 switch({name})

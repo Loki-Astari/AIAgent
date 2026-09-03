@@ -67,6 +67,8 @@ require("aiagent").setup()
 ```lua
 require("aiagent").setup({
   width = 0.4,                -- Width as percentage (0-1) or absolute columns (>1)
+  auto_resize = true,         -- Keep the agent pane's share of the screen when the terminal resizes
+  min_width = 20,             -- Columns the agent pane (and the rest of the layout) never drops below
   default_agent = "claude",   -- Symbolic agent name to use on startup
   auto_send_context = false,  -- Auto-send open buffer paths when entering terminal
   agent_startup_delay = 1500, -- ms to wait before sending /color on agent start
