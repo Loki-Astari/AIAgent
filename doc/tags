@@ -2,6 +2,7 @@
 :AgentClose	aiagent.txt	/*:AgentClose*
 :AgentCloseAll	aiagent.txt	/*:AgentCloseAll*
 :AgentDiff	aiagent.txt	/*:AgentDiff*
+:AgentFind	aiagent.txt	/*:AgentFind*
 :AgentFork	aiagent.txt	/*:AgentFork*
 :AgentHide	aiagent.txt	/*:AgentHide*
 :AgentInstallSkill	aiagent.txt	/*:AgentInstallSkill*
@@ -38,6 +39,7 @@ aiagent-config-show_header	aiagent.txt	/*aiagent-config-show_header*
 aiagent-config-width	aiagent.txt	/*aiagent-config-width*
 aiagent-contents	aiagent.txt	/*aiagent-contents*
 aiagent-diagnostics	aiagent.txt	/*aiagent-diagnostics*
+aiagent-find-session	aiagent.txt	/*aiagent-find-session*
 aiagent-health	aiagent.txt	/*aiagent-health*
 aiagent-history-fork	aiagent.txt	/*aiagent-history-fork*
 aiagent-history-jump	aiagent.txt	/*aiagent-history-jump*
@@ -57,6 +59,7 @@ aiagent-registry-sidecar	aiagent.txt	/*aiagent-registry-sidecar*
 aiagent-registry-status	aiagent.txt	/*aiagent-registry-status*
 aiagent-registry-task	aiagent.txt	/*aiagent-registry-task*
 aiagent-requirements	aiagent.txt	/*aiagent-requirements*
+aiagent-session-load	aiagent.txt	/*aiagent-session-load*
 aiagent-setup	aiagent.txt	/*aiagent-setup*
 aiagent-worktrees	aiagent.txt	/*aiagent-worktrees*
 aiagent.bufferline_name_formatter()	aiagent.txt	/*aiagent.bufferline_name_formatter()*

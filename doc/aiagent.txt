@@ -22,7 +22,8 @@ CONTENTS                                                    *aiagent-contents*
  13. Prompt History ............ |aiagent-prompt-history|
  14. Agent Registry ........... |aiagent-registry|
  15. History Tree .............. |aiagent-history-tree|
- 16. Health check .............. |aiagent-health|
+ 16. Finding Past Sessions ..... |aiagent-find-session|
+ 17. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -335,6 +336,11 @@ known_agents ~
   deliberately not the same as Claude's `--resume`.
   See |aiagent.prompt_history_load_context()|.
 
+:AgentFind              Find any past Claude session on this machine and load
+:AgentFind!             it back into an agent. `!` also lists the promptless
+                        stubs Claude Code leaves behind. Documented in full
+                        under |aiagent-find-session|.
+
                                                        *:AgentInstallSkill*
 :AgentInstallSkill[!]
   Install the bundled `prompt-history` Claude skill into
@@ -360,6 +366,7 @@ Terminal mode ~
   <C-\><C-r>    Search input history (agent-specific)
   <C-\><C-l>    List agents in all Neovim instances (see |:AgentList|)
   <C-\><C-t>    Open the session history tree (see |:AgentTree|)
+  <C-\><C-f>    Find a past session and load it back (see |:AgentFind|)
 
 Scroll mode (normal mode inside terminal buffer) ~
   i             Exit scroll mode and resume terminal input
@@ -1110,7 +1117,80 @@ future version changes them the tree reports that it cannot be read rather
 than guessing.
 
 ==============================================================================
-16. HEALTH CHECK                                           *aiagent-health*
+16. FINDING PAST SESSIONS                            *aiagent-find-session*
+
+                                                                  *:AgentFind*
+:AgentFind              Find any past Claude session on this machine and load
+                        it back into an agent.
+:AgentFind!             The same, but also lists the promptless stubs Claude
+                        Code leaves behind for every start that never got a
+                        question. They outnumber the real sessions, which is
+                        why they are hidden by default.
+
+Also bound to <C-\><C-f> inside the agent terminal.
+
+Closing a terminal does not lose the conversation in it. Claude Code keeps one
+transcript per session under `~/.claude/projects/` and never deletes them, so
+every session you have ever run is still on disk. |:AgentFind| lists them,
+newest first: >
+
+   ● 13:05   38  AgentList key bindings   We just added the command "Agent…  AIAgent
+     13:01   31  AgentList key bindings   We just added the command "Agent…  AIAgent
+     11:31    4  Poem about dwarves       Write a poem about dwarves.        Repo
+<
+The columns are: whether the session is live in a running agent (`●`), when it
+was last touched, how many prompts you typed in it, Claude Code's own name for
+it, its opening prompt, and the directory it ran in. Searching matches all of
+those plus the session's LAST prompt and its id, so "what was I doing at the
+end of that" finds it too.
+
+The picker is |telescope| when telescope.nvim is installed — the preview pane
+shows that session's |:AgentTree|, so you can see the shape of a conversation
+before committing to it. Without telescope you get the plugin's own float,
+where `/` searches, <CR> loads and `q` closes.
+
+  <CR>          Load the session under the cursor
+  <C-t>         Open that session's history tree instead (`t` in the float)
+
+Sessions from EVERY project are listed, not just this one: a session resumes
+by id regardless of which directory you resume it from, and scoping the list
+to the current repo is the kind of filter that hides the thing you are looking
+for. Type the directory name to narrow it.
+
+HOW LOADING WORKS ~                                    *aiagent-session-load*
+
+Loading resumes the session with `--resume <id> --fork-session`, so:
+
+  - The archive is never written to. It stays exactly as it was and can be
+    loaded again, as often as you like — including into two agents at once.
+  - No `last-prompt` pointer is written either. With none, resume takes the
+    session's newest leaf, which is precisely "carry on where I left off".
+
+To start from an EARLIER point in a past session, open its tree instead
+(<C-t> on the row) and fork from the turn you want; see |aiagent-history-fork|.
+
+With an agent running, the load happens in place: same panes, same name, same
+worktree, same colour — only the process and the history behind it change, the
+way a jump does (see |aiagent-history-jump|). With no agent running, a fresh
+one is opened in the current directory.
+
+The loaded agent gets a task label naming the session, so |:AgentList| says
+where it came from.
+
+Two things to know:
+
+  - The files in the recovered context are the paths the session saw. If it ran
+    in a worktree that no longer exists, the conversation is intact but those
+    paths are not.
+  - Loading a session that is still live in another agent is safe — the fork
+    only reads it — and is reported when it happens.
+
+Scanning is a streamed read of each transcript, decoding only the lines that
+can carry a prompt or a title, so a full corpus scan costs tens of
+milliseconds rather than parsing megabytes of tool traffic.
+
+==============================================================================
+17. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 

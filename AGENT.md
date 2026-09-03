@@ -46,6 +46,7 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 - `lua/aiagent/prompthistory.lua` - Prompt-history diff viewer (see [Prompt History](#prompt-history))
 - `lua/aiagent/registry.lua` - Cross-instance agent registry and its list viewer (see [Agent Registry](#agent-registry))
 - `lua/aiagent/history.lua` - Session history tree popup and node jumping (see [History Tree](#history-tree))
+- `lua/aiagent/sessions.lua` - Past-session finder and loader (see [Finding Past Sessions](#finding-past-sessions))
 - `lua/aiagent/health.lua` - Health check implementation (`:checkhealth aiagent`)
 - `hooks/prompt_snapshot.sh` - Claude Code `pre`/`post` hooks that capture per-prompt git tree snapshots
 - `hooks/prompt_history_inspect.sh` - Terminal tool to list/dump captured sessions
@@ -435,6 +436,80 @@ mode. Every cancel path notifies, so an abandoned fork never looks like a no-op.
   business.
 - These entry types are undocumented internals. Everything degrades to "no tree
   available" rather than throwing.
+
+## Finding Past Sessions
+
+`:AgentFind` / `<C-\><C-f>` lists every Claude Code session on the machine and
+loads a chosen one back into an agent. It exists because closing a terminal
+loses the *view* of a conversation, never the conversation — Claude Code keeps
+one transcript per session under `~/.claude/projects/` and never deletes them.
+
+### Scanning (`sessions.inspect`, `sessions.scan`)
+
+Each transcript is streamed once, and only lines that can carry what the list
+needs are decoded. Two prefilters do the work:
+
+- `"type":"user"` for the prompt count, first prompt and last prompt. Assistant
+  and tool entries outnumber prompts by more than 20:1, so decoding everything
+  would dominate the scan. `registry._human_text` then rejects the `user`
+  entries that are not prompts (tool results, injected envelopes).
+- `"ai-title"` for the label. **Claude Code names its own sessions** and appends
+  a fresh `{"type":"ai-title","aiTitle":…}` entry as the session goes on, so the
+  LAST one wins. This is a far better label than anything derivable.
+
+`cwd` and `gitBranch` are lifted with a string match rather than a decode —
+they repeat on nearly every entry, so decoding for them would mean decoding the
+whole file. Measured cost: ~50ms for 26 sessions / 14MB.
+
+Sessions with no prompt in them are dropped unless `all`: Claude Code leaves a
+stub transcript behind for every start that never got a question, and they
+outnumber the real ones. Liveness comes from `registry.read_all({derive=false})`,
+so a session still being written to is marked rather than hidden.
+
+### Loading (`M.session_load`)
+
+`--resume <id> --fork-session`, and **no leaf pointer is written**. Two
+properties follow, both deliberate:
+
+- The archive is never mutated, so it can be loaded repeatedly, and into two
+  agents at once.
+- With no pointer, resume takes the session's newest leaf — exactly "carry on
+  where I left off". Starting from an *earlier* point is `:AgentTree`'s job
+  (`<C-t>` on a row opens the tree for that session, where `f` forks a node).
+
+**Resume is not scoped to a directory.** Verified: `claude --resume <id>` from an
+unrelated cwd resumes fine and keeps appending to the session's own project
+directory. That is why the finder lists every project's sessions rather than
+filtering to the current repo, and why `history.transcript_path` globbing all of
+`~/.claude/projects/*/` is the right lookup.
+
+### `relaunch_agent`
+
+The in-place restart — detach bookkeeping, stop the job, optionally write to the
+transcript, recreate into the existing panes, restore identity — is shared by
+`history_jump` and `session_load`. Its `prepare` callback runs in the only safe
+window for touching the transcript (job stopped, new one not yet started); see
+the History Tree notes on why that order is not negotiable. `base_command`
+strips `--resume`/`--fork-session` so repeated moves do not accumulate flags.
+
+Fixing this up surfaced a latent bug: `ensure_layout` called
+`create_window_layout` before it was declared, so the name resolved as a nil
+global. Every existing caller happened to hit the `M.is_open()` early return —
+`session_load` with no agent running was the first to reach it. There is now a
+forward declaration.
+
+### Picker
+
+Telescope when it is installed, with the session's `history.render` tree in the
+preview pane (cached per session id — parsing a multi-megabyte transcript on
+every cursor move is too slow, and a transcript nobody is writing to cannot
+change underneath). `<C-t>` is remapped off telescope's open-in-tab to "open
+this session's tree". Without telescope, the plugin's own float, where `/`
+searches for free.
+
+`sessions.format` / `sessions.render` are pure and unit tested without a window.
+Highlight ranges are **byte** offsets while column padding is computed in
+**display** width — the `●` marker is three bytes and one cell.
 
 ## GitHub MCP Setup
 

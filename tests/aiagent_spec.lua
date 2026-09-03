@@ -751,3 +751,190 @@ describe("aiagent.history", function()
   end)
 
 end)
+
+describe("aiagent.sessions", function()
+  local sessions = require("aiagent.sessions")
+  local made = {}
+
+  -- A transcript shaped like a real one: two typed prompts, with the entries
+  -- that merely LOOK like prompts (a tool result, an injected envelope) mixed
+  -- in, and Claude Code's own title rewritten as the session goes on.
+  local function write_transcript(dir, id, turns)
+    local out = {}
+    local function line(t) table.insert(out, vim.json.encode(t)) end
+    line({ type = "ai-title", aiTitle = "First guess", sessionId = id })
+    if turns then
+      line({ type = "user", uuid = "u1", parentUuid = vim.NIL,
+             cwd = "/repo/work", gitBranch = "agent/x",
+             message = { role = "user", content = { { type = "text", text = "open the hatch" } } } })
+      line({ type = "assistant", uuid = "a1", parentUuid = "u1", cwd = "/repo/work",
+             message = { role = "assistant", content = {
+               { type = "tool_use", name = "Edit", input = { file_path = "/repo/init.lua" } } } } })
+      -- A tool result comes back as a `user` entry; it is not a prompt.
+      line({ type = "user", uuid = "u2", parentUuid = "a1", cwd = "/repo/work",
+             message = { role = "user", content = { { type = "tool_result", content = "ok" } } } })
+      -- Nor is an envelope Claude Code injects.
+      line({ type = "user", uuid = "u3", parentUuid = "u2", cwd = "/repo/work",
+             message = { role = "user", content = "<system-reminder>be good</system-reminder>" } })
+      line({ type = "user", uuid = "u4", parentUuid = "u3", cwd = "/repo/work",
+             message = { role = "user", content = { { type = "text", text = "close the hatch" } } } })
+      line({ type = "ai-title", aiTitle = "Hatch operations", sessionId = id })
+    end
+    local path = dir .. "/" .. id .. ".jsonl"
+    vim.fn.writefile(out, path)
+    table.insert(made, path)
+    return path
+  end
+
+  after_each(function()
+    for _, p in ipairs(made) do vim.fn.delete(p) end
+    made = {}
+  end)
+
+  it("counts only typed prompts and takes the newest title", function()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    local entry = sessions.inspect(write_transcript(dir, "s1", true))
+
+    assert.equals(2, entry.turns)
+    assert.equals("open the hatch", entry.prompt)
+    assert.equals("close the hatch", entry.last)
+    -- The title is rewritten as the session goes on, so the LAST one wins.
+    assert.equals("Hatch operations", entry.title)
+    -- cwd and gitBranch are lifted by string match, not by decoding the line.
+    assert.equals("/repo/work", entry.cwd)
+    assert.equals("agent/x", entry.branch)
+    assert.equals("s1", entry.id)
+    vim.fn.delete(dir, "rf")
+  end)
+
+  it("drops promptless stubs unless asked for them", function()
+    local root = vim.fn.tempname()
+    local project = root .. "/-repo-work"
+    vim.fn.mkdir(project, "p")
+    write_transcript(project, "real", true)
+    write_transcript(project, "stub", false)
+
+    local orig = sessions.projects_dir
+    sessions.projects_dir = function() return root end
+    local kept = sessions.scan({})
+    local all = sessions.scan({ all = true })
+    sessions.projects_dir = orig
+
+    assert.equals(1, #kept)
+    assert.equals("real", kept[1].id)
+    assert.equals(2, #all)
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("searches on title, both ends of the conversation, and place", function()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    local text = sessions.search_text(sessions.inspect(write_transcript(dir, "s2", true)))
+
+    assert.is_truthy(text:find("Hatch operations", 1, true))
+    assert.is_truthy(text:find("open the hatch", 1, true))
+    assert.is_truthy(text:find("close the hatch", 1, true))
+    assert.is_truthy(text:find("work", 1, true))
+    assert.is_truthy(text:find("s2", 1, true))
+    vim.fn.delete(dir, "rf")
+  end)
+
+  it("highlights by byte offset while padding in display width", function()
+    local entry = { id = "abcdef", title = "Ünicode títle", prompt = "do it",
+                    turns = 3, mtime = os.time(), cwd = "/repo/work", live = true }
+    local line, hls = sessions.format(entry, 100)
+
+    -- The live marker is three bytes and one cell, so a highlight range that
+    -- was measured in cells would not slice cleanly out of the line.
+    assert.is_truthy(line:match("^● "))
+    for _, h in ipairs(hls) do
+      assert.equals(h.end_col - h.col, #line:sub(h.col + 1, h.end_col))
+    end
+
+    -- Same reason in the other direction: a multibyte title must not shift the
+    -- cells after it, so the rows stay the same width.
+    local ascii = vim.deepcopy(entry)
+    ascii.title = "ascii title"
+    -- Parenthesised: format() returns (line, highlights), and the highlight
+    -- list would otherwise land in strdisplaywidth's second argument.
+    assert.equals(vim.fn.strdisplaywidth((sessions.format(ascii, 100))),
+      vim.fn.strdisplaywidth(line))
+  end)
+
+  it("renders one row per session, mapped back to its entry", function()
+    local a = { id = "a", title = "one", prompt = "p", turns = 1, mtime = os.time() }
+    local b = { id = "b", title = "two", prompt = "q", turns = 2, mtime = os.time() }
+    local lines, _, rows = sessions.render({ a, b }, { width = 90 })
+
+    assert.equals(2, #lines)
+    assert.equals(a, rows[1].entry)
+    assert.equals(b, rows[2].entry)
+  end)
+end)
+
+describe("aiagent.sessions preview", function()
+  local sessions = require("aiagent.sessions")
+
+  it("offsets the tree's highlights past the preview header", function()
+    -- One turn is enough: what is under test is that the highlight lines are
+    -- shifted by the header the preview prepends, not the tree itself.
+    local path = vim.fn.tempname() .. ".jsonl"
+    vim.fn.writefile({
+      vim.json.encode({ type = "user", uuid = "u1", parentUuid = vim.NIL,
+        isSidechain = false, origin = { kind = "human" },
+        timestamp = "2026-09-01T18:34:12.051Z", cwd = "/repo/work",
+        message = { role = "user", content = { { type = "text", text = "open the hatch" } } } }),
+      vim.json.encode({ type = "assistant", uuid = "a1", parentUuid = "u1",
+        timestamp = "2026-09-01T18:34:20.000Z",
+        message = { role = "assistant", content = { { type = "text", text = "done" } } } }),
+    }, path)
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    sessions._preview_into(buf, sessions.inspect(path), 80)
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+    -- Header, blank line, then the tree.
+    assert.is_truthy(lines[1]:find("/repo/work", 1, true) or lines[2]:find("/repo/work", 1, true))
+    local found
+    for _, l in ipairs(lines) do
+      if l:find("open the hatch", 1, true) then found = l end
+    end
+    assert.is_truthy(found)
+
+    local marks = vim.api.nvim_buf_get_extmarks(buf,
+      vim.api.nvim_create_namespace("AIAgentSessions"), 0, -1, {})
+    assert.is_true(#marks > 0)
+    -- Every mark must sit on a line that exists, and none on the header.
+    for _, m in ipairs(marks) do
+      assert.is_true(m[2] >= 3 and m[2] < #lines)
+    end
+
+    vim.api.nvim_buf_delete(buf, { force = true })
+    vim.fn.delete(path)
+  end)
+end)
+
+describe("aiagent._base_command", function()
+  local base = aiagent._base_command
+
+  before_each(function()
+    aiagent.setup({ known_agents = { claude = "claude --dangerously-skip-permissions" } })
+  end)
+
+  it("falls back to the configured executable with no agent", function()
+    assert.equals("claude --dangerously-skip-permissions", base(nil))
+  end)
+
+  it("strips the flags a previous jump, fork or load left behind", function()
+    -- Otherwise repeated moves accumulate them: `--resume a --resume b`.
+    assert.equals("claude", base({ command = "claude --resume abc-123" }))
+    assert.equals("claude", base({ command = "claude --resume abc-123 --fork-session" }))
+    assert.equals("claude --verbose",
+      base({ command = "claude --verbose --resume abc-123 --fork-session" }))
+  end)
+
+  it("leaves an unrelated command line alone", function()
+    assert.equals("claude --verbose", base({ command = "claude --verbose" }))
+  end)
+end)

@@ -40,6 +40,11 @@ end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentFork", function(o)
   require("aiagent").fork_here(o.fargs[1], o.fargs[2])
 end, { nargs = "*" })
+-- Find any past Claude session on this machine and load it back into an agent.
+-- `!` also lists the promptless stubs Claude Code leaves behind.
+vim.api.nvim_create_user_command("AgentFind", function(o)
+  require("aiagent").find_session({ all = o.bang })
+end, { nargs = 0, bang = true })
 vim.api.nvim_create_user_command("AgentSessions", function(o)
   -- Plain `:AgentSessions` picks the session to continue capturing into;
   -- `:AgentSessions!` loads the chosen session's prompt history into the agent.

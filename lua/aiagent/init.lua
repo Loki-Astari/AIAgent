@@ -596,6 +596,12 @@ update_winbar = function()
   vim.api.nvim_set_option_value("winbar", build_winbar(), { win = M.win })
 end
 
+-- Forward declaration: ensure_layout() below is defined before the layout
+-- builder it calls, and without this the name would resolve as a (nil) global.
+-- Every existing caller happened to hit the early return, so the break only
+-- showed up the first time ensure_layout() ran with no column open.
+local create_window_layout
+
 --- Ensure the agent column exists, without ever leaving a half-built one.
 ---
 --- create_window_layout() unconditionally creates BOTH panes, so calling it
@@ -628,7 +634,7 @@ local function update_header()
     "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-v> paste reg",
     "<C-\\><C-c> send context | <C-\\><C-a> cycle agents",
     "<C-\\><C-d> diff | <C-\\><C-r> search | <C-\\><C-l> all agents",
-    "<C-\\><C-t> history tree",
+    "<C-\\><C-t> history tree | <C-\\><C-f> find session",
   }
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
@@ -696,7 +702,8 @@ function M.next_agent()
 end
 
 --- Create the window layout (optional header + terminal area)
-local function create_window_layout()
+--- (declared local above, so ensure_layout() can reach it.)
+function create_window_layout()
   -- Remember the current window to return to later
   M.prev_win = vim.api.nvim_get_current_win()
 
@@ -1003,6 +1010,17 @@ local function create_agent(name, cwd, opts)
     noremap = true,
     callback = function()
       M.history_open()
+    end,
+  })
+
+  -- Find a past session and load it back into this agent.
+  vim.api.nvim_buf_set_keymap(buf, "t", "<C-\\><C-f>", "", {
+    noremap = true,
+    callback = function()
+      -- Out of insert mode first: the finder is a normal-mode UI, and
+      -- telescope's prompt inherits a terminal-mode keymap stack otherwise.
+      vim.cmd("stopinsert")
+      vim.schedule(function() M.find_session() end)
     end,
   })
 
@@ -1978,6 +1996,105 @@ function M.history_open(session)
   require('aiagent.history').show({ session = session })
 end
 
+--- An agent's command with any resume flags from an earlier jump, fork or load
+--- stripped, so repeated moves do not accumulate them.
+---@param agent table|nil  nil falls back to the configured executable
+---@return string
+local function base_command(agent)
+  local cmd = (agent and agent.command) or get_command()
+  return (cmd:gsub("%s+%-%-resume%s+%S+", ""):gsub("%s+%-%-fork%-session", ""))
+end
+
+--- Replace the current agent's process in place, keeping its panes, its name
+--- and its whole identity — colour, worktree, git root, slug, task, sent files.
+--- Only the process changes.
+---
+--- `prepare` runs with the old job already stopped and before the new one
+--- starts, which is the only safe window for writing to the session transcript:
+--- a live session writes its own `last-prompt` at the end of every turn and
+--- would clobber anything written underneath it.  Returning false aborts.
+---
+--- The old agent is gone by then either way, so an aborted relaunch leaves no
+--- agent running — the caller reports and stops.
+---@param name string
+---@param command_of fun(base: string): string  builds the new command line
+---@param prepare fun(): boolean, string|nil
+---@return boolean ok
+local function relaunch_agent(name, command_of, prepare)
+  local agent = M.agents[name]
+  if not agent then return false end
+
+  -- Carry the agent's identity across the restart.
+  local keep = {
+    color = agent.color,
+    worktree = agent.worktree,
+    git_root = agent.git_root,
+    slug = agent.slug,
+    task = agent.task,
+    sent_files = agent.sent_files,
+    agent_type = agent.agent_type,
+  }
+  local base = base_command(agent)
+  local cwd = agent.worktree
+
+  -- Detach from the plugin's bookkeeping BEFORE stopping the job.  The
+  -- terminal's on_exit calls M.close(name), which tears the whole column down
+  -- when no agents remain — with the agent already gone from M.agents and no
+  -- longer current, that call finds nothing to do and the panes survive.
+  local old_buf = agent.buf
+  local job = agent.job_id
+  M.agents[name] = nil
+  M.current_agent = nil
+
+  if job ~= nil then
+    pcall(vim.fn.chanclose, job)
+    pcall(vim.fn.jobstop, job)
+    pcall(vim.fn.jobwait, { job }, 500)
+  end
+  pcall(function() require('aiagent.registry').unpublish(name) end)
+
+  if prepare then
+    local ok, err = prepare()
+    if not ok then
+      vim.notify(err or "Could not prepare the session", vim.log.levels.ERROR)
+      return false
+    end
+  end
+
+  -- Free the "agent:<name>" buffer name before recreating: the old buffer must
+  -- stay alive (deleting it while it is the only one in M.win would take the
+  -- window with it) but nvim_buf_set_name() fails with E95 on a duplicate.
+  if old_buf ~= nil and vim.api.nvim_buf_is_valid(old_buf) then
+    pcall(vim.api.nvim_buf_set_name, old_buf, "agent:" .. name .. ":retired:" .. old_buf)
+  end
+
+  -- Restart INTO the existing panes.  create_agent() swaps the new terminal
+  -- buffer into M.win, so the header pane and the column are untouched.
+  ensure_layout()
+  if not create_agent(name, cwd, {
+        command = command_of(base),
+        color = keep.color,
+      }) then
+    return false
+  end
+  M.current_agent = name
+  for k, v in pairs(keep) do M.agents[name][k] = v end
+
+  -- The window is showing the new buffer now, so dropping the old one cannot
+  -- take the window with it.
+  if old_buf ~= nil and vim.api.nvim_buf_is_valid(old_buf) then
+    pcall(vim.api.nvim_buf_delete, old_buf, { force = true, unload = false })
+  end
+
+  vim.defer_fn(function()
+    pcall(function() require('aiagent.registry').publish_all() end)
+  end, 200)
+
+  update_header()
+  vim.cmd("startinsert")
+  return true
+end
+
 --- Move the current agent to another point in its session history.
 ---
 --- One mechanism for every jump, backwards along the current path or sideways
@@ -2003,76 +2120,18 @@ function M.history_jump(target)
     return false
   end
 
-  -- Carry the agent's identity across the restart; only the process changes.
-  local keep = {
-    color = agent.color,
-    worktree = agent.worktree,
-    git_root = agent.git_root,
-    slug = agent.slug,
-    task = agent.task,
-    sent_files = agent.sent_files,
-    agent_type = agent.agent_type,
-  }
-  -- Strip any --resume from an earlier jump so they do not accumulate.
-  local base = (agent.command or "claude"):gsub("%s+%-%-resume%s+%S+", "")
-  local cwd = agent.worktree
+  local ok = relaunch_agent(name,
+    function(base) return base .. " --resume " .. target.session end,
+    function()
+      local moved, err = require('aiagent.history').set_leaf(
+        target.path, target.session, target.leaf, target.prompt)
+      if not moved then
+        return false, "Could not move the history pointer: " .. (err or "unknown error")
+      end
+      return true
+    end)
+  if not ok then return false end
 
-  -- Detach from the plugin's bookkeeping BEFORE stopping the job.  The
-  -- terminal's on_exit calls M.close(name), which tears the whole column down
-  -- when no agents remain — with the agent already gone from M.agents and no
-  -- longer current, that call finds nothing to do and the panes survive.
-  local old_buf = agent.buf
-  local job = agent.job_id
-  M.agents[name] = nil
-  M.current_agent = nil
-
-  if job ~= nil then
-    pcall(vim.fn.chanclose, job)
-    pcall(vim.fn.jobstop, job)
-    pcall(vim.fn.jobwait, { job }, 500)
-  end
-  pcall(function() require('aiagent.registry').unpublish(name) end)
-
-  -- Only now is it safe to write: a live session would clobber the pointer.
-  local ok, err = require('aiagent.history').set_leaf(
-    target.path, target.session, target.leaf, target.prompt)
-  if not ok then
-    vim.notify("Could not move the history pointer: " .. (err or "unknown error"),
-      vim.log.levels.ERROR)
-    return false
-  end
-
-  -- Free the "agent:<name>" buffer name before recreating: the old buffer must
-  -- stay alive (deleting it while it is the only one in M.win would take the
-  -- window with it) but nvim_buf_set_name() fails with E95 on a duplicate.
-  if old_buf ~= nil and vim.api.nvim_buf_is_valid(old_buf) then
-    pcall(vim.api.nvim_buf_set_name, old_buf, "agent:" .. name .. ":retired:" .. old_buf)
-  end
-
-  -- Restart INTO the existing panes.  create_agent() swaps the new terminal
-  -- buffer into M.win, so the header pane and the column are untouched.
-  ensure_layout()
-  if not create_agent(name, cwd, {
-        command = base .. " --resume " .. target.session,
-        color = keep.color,
-      }) then
-    return false
-  end
-  M.current_agent = name
-  for k, v in pairs(keep) do M.agents[name][k] = v end
-
-  -- The window is showing the new buffer now, so dropping the old one cannot
-  -- take the window with it.
-  if old_buf ~= nil and vim.api.nvim_buf_is_valid(old_buf) then
-    pcall(vim.api.nvim_buf_delete, old_buf, { force = true, unload = false })
-  end
-
-  vim.defer_fn(function()
-    pcall(function() require('aiagent.registry').publish_all() end)
-  end, 200)
-
-  update_header()
-  vim.cmd("startinsert")
   vim.notify("Jumped to: " .. (target.prompt or target.leaf), vim.log.levels.INFO)
   return true
 end
@@ -2117,8 +2176,7 @@ function M.history_fork(target, opts)
       return
     end
 
-    local base = (source.command or "claude"):gsub("%s+%-%-resume%s+%S+", "")
-      :gsub("%s+%-%-fork%-session", "")
+    local base = base_command(source)
     ensure_layout()
     if not create_agent(name, cwd, {
           command = base .. " --resume " .. target.session .. " --fork-session",
@@ -2269,6 +2327,91 @@ function M.fork_here(name, wtname)
   local prompt = tree and tree.current and tree.meta[tree.current].prompt or ""
   M.history_fork({ session = session.id, path = path, leaf = head, prompt = prompt },
     { name = name, wtname = wtname })
+end
+
+--- Find a past session anywhere on this machine and load it back.
+---
+--- Every session Claude Code has ever run is still on disk, so the one whose
+--- terminal you closed is recoverable.  See |aiagent-find-session|.
+---@param opts table|nil { all: boolean|nil }  all=true also lists promptless stubs
+function M.find_session(opts)
+  require('aiagent.sessions').pick(opts)
+end
+
+--- Load a past session into an agent, replacing the current agent's process.
+---
+--- Resumed with `--fork-session`, which starts the conversation again under a
+--- NEW session id and copies the walked path into a new transcript.  So the
+--- archive is never written to and can be loaded again, as often as you like —
+--- and two agents can be loaded from the same past session at once.
+---
+--- No `last-prompt` pointer is written either: with none, resume takes the
+--- session's newest leaf, which is exactly "carry on from where I left off".
+--- Starting from an EARLIER point is |AgentTree|'s job — open the tree on this
+--- session (`<C-t>` in the finder) and fork from the turn you want.
+---
+--- With an agent running, the load happens in place: same panes, same name,
+--- same worktree, only the process and its history change.  With none, a fresh
+--- agent is opened in the current directory.
+---@param entry table { id: string, title: string|nil, cwd: string|nil }
+---@param opts table|nil { name: string|nil }
+---@return boolean ok
+function M.session_load(entry, opts)
+  opts = opts or {}
+  if type(entry) == "string" then entry = { id = entry } end
+  if not entry or not entry.id or entry.id == "" then
+    vim.notify("No session to load", vim.log.levels.WARN)
+    return false
+  end
+
+  -- Loading a session that is still being written to is safe (the fork only
+  -- reads it), but it is rarely what was meant, so say so.
+  if entry.live then
+    vim.notify("That session is live in a running agent; loading a fork of it",
+      vim.log.levels.INFO)
+  end
+
+  local label = entry.title or entry.prompt or entry.id
+  local function command_of(base)
+    return base .. " --resume " .. entry.id .. " --fork-session"
+  end
+
+  local name = M.current_agent
+  local agent = name and M.agents[name]
+
+  if agent then
+    if agent.agent_type ~= "claude" then
+      vim.notify("Loading a session is only supported for Claude agents",
+        vim.log.levels.WARN)
+      return false
+    end
+    if not relaunch_agent(name, command_of, nil) then return false end
+    -- The label is what the finder searched on, so it is the useful thing to
+    -- carry into the agent list as this agent's task.
+    M.agents[name].task = "loaded: " .. label:sub(1, 60)
+    vim.notify("Loaded session into " .. name .. ": " .. label, vim.log.levels.INFO)
+    return true
+  end
+
+  -- Nothing running: open a fresh agent straight onto the session.
+  local new_name = opts.name or "AIAgent"
+  if M.agents[new_name] then
+    vim.notify("An agent named '" .. new_name .. "' already exists", vim.log.levels.WARN)
+    return false
+  end
+  ensure_layout()
+  if not create_agent(new_name, nil, { command = command_of(base_command(nil)) }) then
+    return false
+  end
+  M.current_agent = new_name
+  M.agents[new_name].task = "loaded: " .. label:sub(1, 60)
+  vim.defer_fn(function()
+    pcall(function() require('aiagent.registry').publish_all() end)
+  end, 200)
+  update_header()
+  vim.cmd("startinsert")
+  vim.notify("Loaded session into " .. new_name .. ": " .. label, vim.log.levels.INFO)
+  return true
 end
 
 --- Open the prompt-history diff viewer for a session (default: the current
@@ -2533,6 +2676,8 @@ end
 
 -- Expose internals needed for testing (prefixed with _ by convention)
 M._is_under = is_under
+-- Exposed for tests: the resume/fork flag stripping behind every relaunch.
+M._base_command = function(agent) return base_command(agent) end
 M._plugin_root = plugin_root
 
 return M
