@@ -9,6 +9,20 @@ end
 vim.g.loaded_aiagent = true
 
 vim.api.nvim_create_user_command("AgentOpen",  function(o) require("aiagent").open(unpack(o.fargs)) end, { nargs = "*" })
+-- Open an agent as the only window on the tab page, with no editor beside it.
+-- Meant for `nvim -c AgentOnly` (a shell alias), where Neovim is started purely
+-- to talk to an agent.  During startup the UI is still being sized, so the
+-- terminal is created on VimEnter instead — otherwise the agent inherits the
+-- wrong width and its output is wrapped to it.
+vim.api.nvim_create_user_command("AgentOnly", function(o)
+  local args = o.fargs
+  local function run() require("aiagent").open_only(unpack(args)) end
+  if vim.v.vim_did_enter == 1 then
+    run()
+  else
+    vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = run })
+  end
+end, { nargs = "*" })
 vim.api.nvim_create_user_command("AgentClose",  function(o) require("aiagent").close(o.args ~= "" and o.args or nil) end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentToggle", function(o) require("aiagent").toggle(o.args ~= "" and o.args or nil) end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentHide",   function() require("aiagent").hide() end, { nargs = 0 })
@@ -24,6 +38,8 @@ vim.api.nvim_create_user_command("AgentTask", function(o)
   require("aiagent").set_task(o.args)
 end, { nargs = "*" })
 vim.api.nvim_create_user_command("AgentCloseAll", function() require("aiagent").close_all() end, { nargs = 0 })
+-- Stop every agent and quit Neovim (also on <C-\><C-x> inside the agent).
+vim.api.nvim_create_user_command("AgentQuit", function() require("aiagent").quit() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentSendContext",   function() require("aiagent").send_context() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentResetContext",  function() require("aiagent").reset_context() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentSendSelection",    function() require("aiagent").send_selection() end, { range = true })

@@ -41,7 +41,7 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 
 ## Architecture
 
-- `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, `:AgentSendDiagnostics`, `:AgentDiff`, `:AgentChat`, etc.)
+- `plugin/aiagent.lua` - Lua entry point, defines commands (`:AgentOpen`, `:AgentClose`, `:AgentToggle`, `:AgentSendDiagnostics`, `:AgentDiff`, `:AgentChat`, `:AgentOnly`, etc.)
 - `lua/aiagent/init.lua` - Main Lua module with all plugin logic
 - `lua/aiagent/prompthistory.lua` - Prompt-history diff viewer (see [Prompt History](#prompt-history))
 - `lua/aiagent/registry.lua` - Cross-instance agent registry and its list viewer (see [Agent Registry](#agent-registry))
@@ -128,6 +128,46 @@ redistribution leaves the agent column an arbitrary size. `config.auto_resize`
   hidden makes the saved absolute width meaningless, so the restore in
   `create_window_layout` scales it by the screen-width change.
 - `close_all` clears the ratio, so a full teardown returns to `config.width`.
+
+## Solo Mode
+
+`:AgentOnly` (`M.open_only`) opens an agent as the only window on the tab page,
+for `alias via='nvim -c AgentOnly'` — Neovim started to talk to an agent rather
+than to edit. It is `M.open` followed by closing every other window, with
+`force = false` so a window holding unsaved changes is kept rather than
+discarded, and a wipe of the empty `[No Name]` buffer Neovim starts with
+(`is_throwaway_buf`) so it does not linger in the buffer list.
+
+The non-obvious parts are all about the layout no longer having a second window:
+
+- **The command defers to `VimEnter` when `v:vim_did_enter` is 0.** `-c` commands
+  run while the UI is still being sized, and the terminal would be created at the
+  wrong width — which the agent then wraps its output to for the rest of the
+  session.
+- **`M._width_ratio` is pinned to 1** while solo, so `VimResized` keeps the column
+  full width instead of snapping back to `config.width`. `M._leave_solo` clears it
+  so the configured width applies again once the tab is shared.
+- **Opening a file would land it *in* the agent window**, hiding the terminal. A
+  `BufWinEnter` autocmd (gated on `M._solo`) hands it a full-height window down
+  the left with `topleft vsplit` and puts the terminal back — so opening a file is
+  how solo mode ends, and the result is the ordinary layout. `topleft`, not
+  `leftabove`: the latter splits the terminal pane only, leaving the header
+  spanning the whole screen above both.
+- **The last window on a tab page cannot be closed**, which is exactly this
+  layout, so `close_layout_win()` hands the pane back instead: an ordinary buffer
+  (only when it still shows one of ours — otherwise the buffer list collects a
+  second `[No Name]`) and `LAYOUT_WIN_OPTS` restored to their global values, or the
+  terminal's `winbar`/`signcolumn` settings stick to the window the user is left
+  with. Skipped while `v:exiting` is set; there is nothing to hand back on the way
+  out.
+- **Exiting needs one keystroke.** `<C-\><C-x>` (`M.quit`, `:AgentQuit`) tears the
+  agents down and runs `confirm qall`: without it, leaving a solo Neovim means
+  `<C-\><C-n>` and then quitting each window by hand. `confirm`, not `qall!` —
+  the aim is to skip the window bookkeeping, not to discard an unsaved file. It
+  is mapped in scroll mode as well as terminal mode, and is not solo-specific.
+- **`M.hide()` refuses** when `solo_layout()` — closing the column would leave
+  Neovim with no window at all. That check is computed from the window list, not
+  from `M._solo`, so a window opened some other way (`:vnew`) is accounted for.
 
 ## Git Worktree Support
 

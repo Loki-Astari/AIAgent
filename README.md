@@ -5,6 +5,7 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 ## Features
 
 - **Seamless window management** - Your agent opens in a right-side terminal split that stays out of your way
+- **Agent-only Neovim** - Start Neovim as nothing but an agent window (`alias via='nvim -c AgentOnly'`); open a file later and the editor appears beside it
 - **Auto-insert mode** - Moving into the agent window automatically enters insert mode, so you can start typing immediately without extra keystrokes
 - **Live buffer updates** - When your agent modifies files, Neovim automatically detects the changes and reloads the buffers. You'll always see the latest version of your code without manually running `:e` or `:checktime`
 - **Easy navigation** - Press `<C-\><C-n>` to exit terminal mode and jump back to your previous editing window
@@ -94,6 +95,7 @@ require("aiagent").setup({
 | `:AgentSet {agent}` | Set which agent CLI to use for new agents (e.g. `claude`, `cursor`) |
 | `:AgentSetColor {color}` | Change the color of the current agent |
 | `:AgentOpen [Name [WTName [directory]]]` | Open an agent terminal (see below for full syntax) |
+| `:AgentOnly [Name [WTName [directory]]]` | Open an agent as the **only** window — no editor beside it (see [Agent-only Neovim](#agent-only-neovim)) |
 | `:AgentClose [name]` | Close an agent (defaults to current) |
 | `:AgentToggle [name]` | Toggle an agent terminal (hides it if visible, keeping the session alive) |
 | `:AgentHide` | Hide the agent window without stopping the agent (the session keeps running in the background) |
@@ -102,6 +104,7 @@ require("aiagent").setup({
 | `:AgentList!` | Show every agent in every Neovim instance, and jump to one |
 | `:AgentTask [text]` | Set the task label shown for the current agent in `:AgentList!` (no args clears it) |
 | `:AgentCloseAll` | Close all agents |
+| `:AgentQuit` | Stop every agent and quit Neovim (also `<C-\><C-x>` in the agent) |
 | `:AgentSendContext` | Send open buffer file paths to the agent |
 | `:AgentResetContext` | Reset tracking to re-send all buffer paths |
 | `:'<,'>AgentSendSelection` | Send visual selection to the agent |
@@ -153,8 +156,10 @@ When in the agent terminal:
 | `<C-\><C-d>` | terminal | Open the prompt-history diff viewer (`:AgentDiff`) |
 | `<C-\><C-l>` | terminal | List agents in all Neovim instances (`:AgentList!`) |
 | `<C-\><C-t>` | terminal | Open the session history tree (`:AgentTree`) |
+| `<C-\><C-x>` | terminal | Quit Neovim, back to the shell (`:AgentQuit`) |
 | `i` | scroll | Exit scroll mode and resume terminal interaction |
 | `<C-\><C-n>` | scroll | Exit scroll mode and return to your previous window |
+| `<C-\><C-x>` | scroll | Quit Neovim, back to the shell (`:AgentQuit`) |
 
 ### Scroll mode
 
@@ -232,6 +237,7 @@ require("aiagent").setup({
 
 ```lua
 vim.keymap.set("n", "<leader>ao", "<cmd>AgentOpen<cr>",             { desc = "Open agent (default)" })
+vim.keymap.set("n", "<leader>aO", "<cmd>AgentOnly<cr>",             { desc = "Open agent as the only window" })
 vim.keymap.set("n", "<leader>ac", "<cmd>AgentOpen Cursor<cr>",      { desc = "Open Cursor agent" })
 vim.keymap.set("n", "<leader>ax", "<cmd>AgentClose<cr>",            { desc = "Close current agent" })
 vim.keymap.set("n", "<leader>at", "<cmd>AgentToggle<cr>",           { desc = "Toggle current agent" })
@@ -241,6 +247,42 @@ vim.keymap.set("v", "<leader>ad", "<cmd>AgentSendDiagnostics<cr>",  { desc = "Se
 vim.keymap.set("n", "<leader>al", "<cmd>AgentList!<cr>",          { desc = "List agents in all Neovim instances" })
 vim.keymap.set("n", "<leader>ag", "<cmd>AgentTree<cr>",           { desc = "Session history tree" })
 ```
+
+### Agent-only Neovim
+
+Sometimes you want the agent, not the editor. `:AgentOnly` opens an agent as the
+only window on the tab page — same arguments as `:AgentOpen`, but every other
+window is closed afterwards, and the empty `[No Name]` buffer Neovim starts with
+is wiped rather than left in the buffer list. A window with unsaved changes is
+never closed.
+
+Put it in a shell alias so Neovim starts straight into the agent:
+
+```bash
+alias via="nvim -c AgentOnly"
+```
+
+Arguments work exactly as for `:AgentOpen`, so a worktree agent is one alias away
+too:
+
+```bash
+alias viaf="nvim -c 'AgentOnly Feature -'"
+```
+
+With lazy.nvim, add `"AgentOnly"` to the plugin's `cmd` list if you load the
+plugin on command.
+
+The layout is not a dead end:
+
+| Then you... | and | 
+|-------------|-----|
+| open a file (`:e`, telescope, …) | it gets its own full-height window on the left and the agent column goes back to its configured width |
+| close the agent (`:AgentClose`) | the pane is handed back as an ordinary window with an empty buffer |
+| run `:AgentHide` | it is refused — there would be nothing left on screen |
+
+To leave, press `<C-\><C-x>` in the agent (`:AgentQuit`): it stops the agents
+and quits Neovim in one keystroke, rather than exiting terminal mode and
+quitting each window by hand. Modified files still get the usual save prompt.
 
 ## Buffer Context Integration
 

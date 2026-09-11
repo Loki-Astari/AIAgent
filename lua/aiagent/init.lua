@@ -44,6 +44,7 @@ M.win = nil             -- shared terminal window
 M.header_buf = nil      -- shared header buffer
 M.header_win = nil      -- shared header window
 M.prev_win = nil        -- Window to return to when exiting terminal mode
+M._solo = false         -- Agent column owns the whole tab page (see |:AgentOnly|)
 M.color_index = 0       -- Counter for cycling through colors
 M.idle_timer = nil      -- repeating timer for idle attention detection
 
@@ -171,6 +172,51 @@ local function cleanup_agent(name)
   M.agents[name] = nil
 end
 
+-- Window-local options create_window_layout() sets on the agent column's panes.
+-- They have to be undone when a pane is handed back to the user instead of being
+-- closed (see close_layout_win) — a leftover 'winbar' or signcolumn:no would
+-- otherwise stick to an ordinary window.
+local LAYOUT_WIN_OPTS = {
+  "number", "relativenumber", "signcolumn", "list", "spell", "colorcolumn", "winbar",
+}
+
+--- Close one of the agent column's windows.
+---
+--- Neovim refuses to close the last window on a tab page, which is exactly the
+--- solo layout (|:AgentOnly|), where the agent column *is* the tab page.  There
+--- the window is handed back as an ordinary one — an empty buffer and the
+--- column's window options undone — so tearing the agent down leaves a plain
+--- Neovim rather than a half-dismantled terminal pane.
+---@param win number|nil
+local function close_layout_win(win)
+  if not (win and vim.api.nvim_win_is_valid(win)) then return end
+
+  -- Nothing to hand back on the way out of Neovim.
+  if #vim.api.nvim_tabpage_list_wins(0) > 1 or vim.v.exiting ~= vim.NIL then
+    pcall(vim.api.nvim_win_close, win, true)
+    return
+  end
+
+  -- A pane still showing one of ours (the terminal, or the nofile header) needs
+  -- a real buffer.  One Neovim has already replaced (buftype "") is left alone,
+  -- so the buffer list does not collect a second empty [No Name].
+  local buf = vim.api.nvim_win_get_buf(win)
+  if vim.api.nvim_get_option_value("buftype", { buf = buf }) ~= "" then
+    local cur = vim.api.nvim_get_current_win()
+    pcall(vim.api.nvim_set_current_win, win)
+    pcall(vim.cmd, "enew")
+    if cur ~= win and vim.api.nvim_win_is_valid(cur) then
+      pcall(vim.api.nvim_set_current_win, cur)
+    end
+  end
+
+  for _, opt in ipairs(LAYOUT_WIN_OPTS) do
+    local ok, global = pcall(vim.api.nvim_get_option_value, opt, { scope = "global" })
+    if ok then pcall(vim.api.nvim_set_option_value, opt, global, { win = win }) end
+  end
+  pcall(vim.api.nvim_set_option_value, "winfixheight", false, { win = win })
+end
+
 --- Force cleanup of all agents and windows
 local function force_cleanup()
   -- Stop the idle attention timer
@@ -190,14 +236,15 @@ local function force_cleanup()
   M._hidden_win_height = nil
   M._hidden_columns = nil
   M._width_ratio = nil
+  M._solo = false
 
   -- Close windows
-  if M.win ~= nil and vim.api.nvim_win_is_valid(M.win) then
-    pcall(vim.api.nvim_win_close, M.win, true)
+  if M.win ~= nil then
+    close_layout_win(M.win)
     M.win = nil
   end
-  if M.header_win ~= nil and vim.api.nvim_win_is_valid(M.header_win) then
-    pcall(vim.api.nvim_win_close, M.header_win, true)
+  if M.header_win ~= nil then
+    close_layout_win(M.header_win)
     M.header_win = nil
   end
 
@@ -414,6 +461,28 @@ function M.setup(opts)
       vim.notify("Worktree [" .. M.current_agent .. "]: " .. rel_path, vim.log.levels.INFO)
     end,
     desc = "Redirect :e to the active agent's worktree when applicable",
+  })
+
+  -- Solo mode (|:AgentOnly|) leaves the agent column owning the whole tab, so a
+  -- file opened afterwards lands *in* the agent window and hides the terminal.
+  -- Give it its own window on the left instead — which is the ordinary layout,
+  -- so opening a file is how solo mode ends.
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    group = augroup,
+    callback = function(args)
+      if not M._solo then return end
+      if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+      if vim.api.nvim_get_current_win() ~= M.win then return end
+      if vim.api.nvim_win_get_buf(M.win) ~= args.buf then return end
+      if vim.api.nvim_get_option_value("buftype", { buf = args.buf }) == "terminal" then return end
+
+      local agent = M.agents[M.current_agent]
+      local term_buf = agent and agent.buf
+      if not (term_buf and vim.api.nvim_buf_is_valid(term_buf)) then return end
+
+      M._leave_solo(args.buf, term_buf)
+    end,
+    desc = "Give a file opened in solo mode its own window instead of the agent's",
   })
 
   -- Handle quit commands - clean up before Neovim checks for running jobs
@@ -727,6 +796,7 @@ local function update_header()
     "<C-\\><C-c> send context | <C-\\><C-a> cycle agents",
     "<C-\\><C-d> diff | <C-\\><C-r> search | <C-\\><C-l> all agents",
     "<C-\\><C-t> history tree | <C-\\><C-f> find session",
+    "<C-\\><C-x> quit neovim",
   }
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
@@ -1126,6 +1196,18 @@ local function create_agent(name, cwd, opts)
     end,
   })
 
+  -- Quit Neovim from inside the agent, without first exiting the terminal and
+  -- closing each window by hand.  Mapped in scroll mode too, so it works
+  -- wherever the cursor happens to be.
+  vim.api.nvim_buf_set_keymap(buf, "t", "<C-\\><C-x>", "", {
+    noremap = true,
+    callback = function() M.quit() end,
+  })
+  vim.api.nvim_buf_set_keymap(buf, "n", "<C-\\><C-x>", "", {
+    noremap = true,
+    callback = function() M.quit() end,
+  })
+
   return buf
 end
 
@@ -1306,6 +1388,107 @@ function M.open(name, wtname, directory)
   vim.cmd("startinsert")
 end
 
+--- True when the agent column is the entire tab page: no editor window beside
+--- it, and nothing left to fall back to if it were closed.
+---@return boolean
+local function solo_layout()
+  if not M.is_open() then return false end
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if win ~= M.win and win ~= M.header_win then return false end
+  end
+  return true
+end
+
+--- Is this the empty, unnamed, unmodified buffer Neovim starts with?
+--- Only such a buffer is wiped when solo mode closes its window; anything the
+--- user actually opened stays in the buffer list.
+---@param buf number
+---@return boolean
+local function is_throwaway_buf(buf)
+  if not vim.api.nvim_buf_is_valid(buf) then return false end
+  if vim.api.nvim_buf_get_name(buf) ~= "" then return false end
+  if vim.api.nvim_get_option_value("buftype",  { buf = buf }) ~= "" then return false end
+  if vim.api.nvim_get_option_value("modified", { buf = buf }) then return false end
+  if vim.fn.bufwinid(buf) ~= -1 then return false end  -- still on screen somewhere
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  return #lines <= 1 and (lines[1] or "") == ""
+end
+
+--- Open an agent as the *only* window on the tab page.
+---
+--- Same arguments as |M.open|, but every other window is closed afterwards, so
+--- Neovim shows the agent and nothing else.  This is for starting the editor
+--- purely to talk to an agent — `nvim -c AgentOnly`, i.e. a shell alias — rather
+--- than opening it alongside files.
+---
+--- The empty [No Name] buffer Neovim starts with is wiped, not just hidden, so
+--- it does not linger in the buffer list.  A window holding unsaved changes is
+--- left alone: solo mode is a convenience, never a reason to lose an edit.
+---
+--- The layout is not a dead end.  Opening a file afterwards gives it its own
+--- window on the left (see M._leave_solo) and the layout becomes the ordinary
+--- one; closing the agent hands the pane back as a plain window.
+---@param name string|nil
+---@param wtname string|nil
+---@param directory string|nil
+function M.open_only(name, wtname, directory)
+  M.open(name, wtname, directory)
+  if not M.is_open() then return end
+
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if win ~= M.win and win ~= M.header_win and vim.api.nvim_win_is_valid(win) then
+      local buf = vim.api.nvim_win_get_buf(win)
+      -- force = false: a window whose buffer has unsaved changes refuses to
+      -- close rather than discarding them.
+      if pcall(vim.api.nvim_win_close, win, false) and is_throwaway_buf(buf) then
+        pcall(vim.api.nvim_buf_delete, buf, {})
+      end
+    end
+  end
+
+  M._solo = solo_layout()
+  if M._solo then
+    -- The column owns the whole screen; record that as its share so a terminal
+    -- resize keeps it full width instead of snapping back to config.width.
+    M._width_ratio = 1
+    M.prev_win = nil
+  end
+
+  if vim.api.nvim_win_is_valid(M.win) then
+    vim.api.nvim_set_current_win(M.win)
+    vim.cmd("startinsert")
+  end
+end
+
+--- Turn a solo layout back into the ordinary one: give `file_buf` a full-height
+--- window down the left and hand the agent column back to `term_buf`.
+---
+--- On M rather than a local because setup() — which registers the autocmd that
+--- calls this — is compiled earlier in the file.
+---@param file_buf number Buffer that landed in the agent window
+---@param term_buf number The agent's terminal buffer, to be restored
+function M._leave_solo(file_buf, term_buf)
+  M._solo = false
+  vim.schedule(function()
+    if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+    if vim.api.nvim_win_get_buf(M.win) ~= file_buf then return end
+    if not vim.api.nvim_buf_is_valid(term_buf) then return end
+
+    vim.api.nvim_set_current_win(M.win)
+    -- topleft: full height down the left of the tab, so the agent column (which
+    -- may be two stacked panes) stays whole on the right.  The new window
+    -- inherits the buffer being split, which is the file we are moving out.
+    vim.cmd("topleft vsplit")
+    M.prev_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(M.win, term_buf)
+
+    -- The column's share was 1 while it owned the screen; drop it so resize()
+    -- falls back to the configured width now that it shares the tab again.
+    M._width_ratio = nil
+    M.resize()
+  end)
+end
+
 --- Close a specific agent or the current one
 ---@param name string|nil Agent name to close (defaults to current)
 function M.close(name)
@@ -1328,12 +1511,13 @@ function M.close(name)
     else
       -- No agents left, close the window
       M.current_agent = nil
-      if M.win ~= nil and vim.api.nvim_win_is_valid(M.win) then
-        pcall(vim.api.nvim_win_close, M.win, true)
+      M._solo = false
+      if M.win ~= nil then
+        close_layout_win(M.win)
         M.win = nil
       end
-      if M.header_win ~= nil and vim.api.nvim_win_is_valid(M.header_win) then
-        pcall(vim.api.nvim_win_close, M.header_win, true)
+      if M.header_win ~= nil then
+        close_layout_win(M.header_win)
         M.header_win = nil
       end
       if M.header_buf ~= nil and vim.api.nvim_buf_is_valid(M.header_buf) then
@@ -1350,6 +1534,21 @@ end
 --- Close all agents and window
 function M.close_all()
   force_cleanup()
+end
+
+--- Stop every agent and quit Neovim, back to the shell.
+---
+--- Agents are torn down first so Neovim never asks about the running terminal
+--- jobs, and `confirm` rather than `!` so a modified file still gets the usual
+--- save prompt — the point is to skip the window bookkeeping, not to discard
+--- work.  In solo mode (|:AgentOnly|) there is nothing to prompt about and this
+--- exits straight away.
+function M.quit()
+  -- Leave terminal mode first: the cmdline prompt `confirm` may raise is
+  -- unreachable from insert mode in a terminal buffer.
+  pcall(vim.cmd, "stopinsert")
+  force_cleanup()
+  vim.cmd("confirm qall")
 end
 
 --- bufferline name_formatter callback.
@@ -1806,6 +2005,13 @@ end
 --- Hide the agent window without killing any agents.
 --- The terminal buffers and jobs stay alive; toggle or open will restore the window.
 function M.hide()
+  -- In solo mode the agent column *is* the tab page, so there is no window to
+  -- hide to — Neovim would be left with nothing on screen.
+  if solo_layout() then
+    vim.notify("Agent window is the only window — nothing to hide to", vim.log.levels.WARN)
+    return
+  end
+
   if M.win and vim.api.nvim_win_is_valid(M.win) then
     M._hidden_win_width = vim.api.nvim_win_get_width(M.win)
     M._hidden_win_height = vim.api.nvim_win_get_height(M.win)

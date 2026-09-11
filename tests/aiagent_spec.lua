@@ -1068,3 +1068,103 @@ describe("aiagent proportional resize", function()
     assert.has_no.errors(function() aiagent.resize() end)
   end)
 end)
+
+describe("aiagent solo mode", function()
+  -- `cat` stands in for an agent CLI: a terminal job that starts instantly and
+  -- then just sits there, so these tests exercise the real open path.
+  local function start_solo(name)
+    aiagent.close_all()
+    aiagent.setup({
+      known_agents = { fake = "cat" },
+      agent_startup_delay = 600000,  -- never inject the /color command here
+      idle_timeout_ms = 0,
+    })
+    aiagent.set("fake")
+    vim.cmd("enew")
+    vim.cmd("only")
+    local scratch = vim.api.nvim_get_current_buf()
+    aiagent.open_only(name or "Solo")
+    vim.cmd("stopinsert")
+    return scratch
+  end
+
+  local function agent_wins()
+    local wins = {}
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if w ~= aiagent.win and w ~= aiagent.header_win then table.insert(wins, w) end
+    end
+    return wins
+  end
+
+  after_each(function()
+    aiagent.close_all()
+    aiagent.setup({})
+  end)
+
+  it("leaves the agent column as the only thing on the tab page", function()
+    local scratch = start_solo()
+    assert.is_true(aiagent.is_open())
+    assert.same({}, agent_wins())
+    assert.is_true(aiagent._solo)
+    -- The empty [No Name] buffer Neovim started with is wiped, not just hidden.
+    assert.is_false(vim.api.nvim_buf_is_valid(scratch))
+  end)
+
+  it("refuses to hide, because there would be nothing left on screen", function()
+    start_solo()
+    local warned = false
+    local notify = vim.notify
+    vim.notify = function(_, level) if level == vim.log.levels.WARN then warned = true end end
+    local ok = pcall(aiagent.hide)
+    vim.notify = notify
+    assert.is_true(ok)
+    assert.is_true(warned)
+    assert.is_true(aiagent.is_open())
+  end)
+
+  it("gives a file opened afterwards its own window and keeps the terminal", function()
+    start_solo()
+    local term_buf = aiagent.agents["Solo"].buf
+    local file = vim.fn.tempname() .. ".txt"
+    vim.fn.writefile({ "hello" }, file)
+
+    vim.api.nvim_set_current_win(aiagent.win)
+    vim.cmd("edit " .. vim.fn.fnameescape(file))
+    vim.wait(1000, function() return #agent_wins() == 1 end)
+
+    assert.equals(1, #agent_wins())
+    assert.equals(term_buf, vim.api.nvim_win_get_buf(aiagent.win))
+    local opened = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(agent_wins()[1]))
+    assert.equals(vim.fn.resolve(file), vim.fn.resolve(opened))
+    assert.is_false(aiagent._solo)
+    -- The column shares the tab again, so it goes back to the configured width.
+    assert.equals(agent_wins()[1], aiagent.prev_win)
+    vim.fn.delete(file)
+  end)
+
+  it("maps <C-\\><C-x> on the agent buffer in both terminal and scroll mode", function()
+    start_solo()
+    local buf = aiagent.agents["Solo"].buf
+    for _, mode in ipairs({ "t", "n" }) do
+      local found = false
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
+        if map.lhs:lower():find("c%-x") then found = true end
+      end
+      assert.is_true(found, "no <C-\\><C-x> mapping in mode " .. mode)
+    end
+  end)
+
+  it("hands the pane back as an ordinary window when the agent is closed", function()
+    start_solo()
+    aiagent.close("Solo")
+    assert.is_false(aiagent.is_open())
+    -- Whichever of the two panes is closed last cannot be: it is handed back.
+    local wins = vim.api.nvim_tabpage_list_wins(0)
+    assert.equals(1, #wins)
+    local win = wins[1]
+    local buf = vim.api.nvim_win_get_buf(win)
+    assert.equals("", vim.api.nvim_get_option_value("buftype", { buf = buf }))
+    assert.equals("", vim.api.nvim_get_option_value("winbar", { win = win }))
+    assert.is_false(aiagent._solo)
+  end)
+end)

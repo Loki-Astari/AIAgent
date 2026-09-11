@@ -32,6 +32,7 @@ AIAgent.nvim integrates AI agent CLIs (Claude Code, Aider, Gemini, etc.) into
 Neovim as a persistent terminal split. Features include:
 
   - Right-side terminal split with optional keybind header
+  - Solo mode: Neovim as an agent window with no editor (|:AgentOnly|)
   - Multiple named agents running simultaneously
   - Per-agent color theming via the agent's own /color command
   - Git worktree support (isolated branches per agent)
@@ -230,6 +231,35 @@ known_agents ~
   directory   Explicit directory for a new worktree. Error if the
               worktree already exists.
 
+                                                              *:AgentOnly*
+:AgentOnly [Name [WTName [directory]]]
+                                                        *aiagent-solo-mode*
+  Open an agent as the ONLY window on the tab page: same arguments as
+  |:AgentOpen|, but every other window is closed afterwards, so Neovim
+  shows the agent and nothing else. A window holding unsaved changes is
+  left alone; the empty [No Name] buffer Neovim starts with is wiped, so
+  it does not linger in the buffer list.
+
+  This is meant for starting Neovim purely to talk to an agent, with no
+  file open — put it in a shell alias: >bash
+    alias via='nvim -c AgentOnly'
+<
+  During startup the UI is still being sized, so the command defers the
+  terminal to |VimEnter|; the agent would otherwise inherit the wrong
+  width. With lazy.nvim, add "AgentOnly" to the plugin's `cmd` list if
+  you load the plugin on command.
+
+  The layout is not a dead end:
+
+    - Opening a file afterwards gives it its own full-height window down
+      the left and the layout becomes the ordinary one (the agent column
+      returns to |aiagent-config-width|).
+    - Closing the agent (|:AgentClose|, |:AgentCloseAll|) hands the pane
+      back as an ordinary window with an empty buffer, rather than
+      leaving a dead terminal on screen.
+    - |:AgentHide| refuses while the agent is the only window, since
+      there would be nothing left to show.
+
                                                              *:AgentClose*
 :AgentClose [Name]
   Close the named agent (default: current agent). If it was the last
@@ -247,7 +277,8 @@ known_agents ~
   the session keeps running in the background and can be brought back with
   |:AgentOpen|, |:AgentToggle| or |:AgentSwitch|. Contrast with
   |:AgentClose|, which stops the agent. Focus returns to the previous
-  window.
+  window. Refused when the agent is the only window on the tab page
+  (see |:AgentOnly|).
 
                                                             *:AgentSwitch*
 :AgentSwitch {Name}
@@ -287,6 +318,19 @@ known_agents ~
                                                           *:AgentCloseAll*
 :AgentCloseAll
   Close all running agents and the terminal window.
+
+                                                              *:AgentQuit*
+:AgentQuit
+  Stop every agent and quit Neovim, back to the shell. Also bound to
+  <C-\><C-x> inside the agent terminal (and in scroll mode), which is the
+  point: exiting otherwise means leaving terminal mode and then quitting
+  each window by hand.
+
+  The agents are torn down first, so Neovim never asks about the running
+  terminal jobs, and the quit is a `:confirm qall` — a modified file still
+  gets the usual save prompt rather than being discarded. With no files
+  open (see |:AgentOnly|) there is nothing to prompt about and it exits
+  straight away.
 
                                                        *:AgentSendContext*
 :AgentSendContext
@@ -388,10 +432,12 @@ Terminal mode ~
   <C-\><C-l>    List agents in all Neovim instances (see |:AgentList|)
   <C-\><C-t>    Open the session history tree (see |:AgentTree|)
   <C-\><C-f>    Find a past session and load it back (see |:AgentFind|)
+  <C-\><C-x>    Quit Neovim, back to the shell (see |:AgentQuit|)
 
 Scroll mode (normal mode inside terminal buffer) ~
   i             Exit scroll mode and resume terminal input
   <C-\><C-n>    Exit scroll mode and return to the previous window
+  <C-\><C-x>    Quit Neovim, back to the shell (see |:AgentQuit|)
   Any normal-mode motion (j, k, /, ?, G, etc.) to browse history
 
 Scroll mode position memory ~
@@ -414,6 +460,10 @@ setup({opts})
 open({name}, {wtname}, {directory})
   Programmatic equivalent of |:AgentOpen|.
 
+                                                 *aiagent.open_only()*
+open_only({name}, {wtname}, {directory})
+  Programmatic equivalent of |:AgentOnly|.
+
                                                     *aiagent.close()*
 close({name})
   Programmatic equivalent of |:AgentClose|.
@@ -421,6 +471,10 @@ close({name})
                                                    *aiagent.toggle()*
 toggle({name})
   Programmatic equivalent of |:AgentToggle|.
+
+                                                     *aiagent.quit()*
+quit()
+  Programmatic equivalent of |:AgentQuit|.
 
                                                      *aiagent.hide()*
 hide()
