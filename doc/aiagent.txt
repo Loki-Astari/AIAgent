@@ -78,6 +78,7 @@ Full example: >lua
     default_agent       = "claude",
     auto_send_context   = false,
     agent_startup_delay = 1500,
+    agent_ready_timeout = 300000,
     show_header         = true,
     scroll_start_line   = 9,
     idle_timeout_ms     = 8000,
@@ -139,8 +140,26 @@ auto_send_context ~
                                         *aiagent-config-agent_startup_delay*
 agent_startup_delay ~
   Type: number  Default: `1500`
-  Milliseconds to wait after starting the agent before sending the
-  `/color` command. Increase if your agent takes longer to initialize.
+  Minimum milliseconds to wait after starting the agent before the
+  `/color` command may be sent.  This is a floor, not the whole answer:
+  the command is held back until the agent is actually showing its input
+  box, however long that takes.  See |aiagent-config-agent_ready_timeout|.
+
+                                        *aiagent-config-agent_ready_timeout*
+agent_ready_timeout ~
+  Type: number  Default: `300000`
+  Maximum milliseconds to wait for the agent's input box to appear before
+  giving up on sending `/color` at all.  `0` waits indefinitely.
+
+  The default is deliberately generous.  In a directory Claude Code has
+  not been trusted with yet, it opens on a "Do you trust the files in
+  this folder?" dialog and waits for an answer; the colour is applied
+  once the dialog is answered, however long the user takes.
+
+  Nothing is ever typed into the agent before that input box appears.
+  Sending a bare <CR> into a dialog would answer it -- and the trust
+  dialog's default-highlighted row is "No, exit", which quits the agent
+  and tears the window down.
 
                                               *aiagent-config-show_header*
 show_header ~

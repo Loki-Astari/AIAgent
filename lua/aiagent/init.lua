@@ -8,7 +8,8 @@ M.config = {
   min_width = 20,      -- Columns the agent column (and the rest of the layout) may never drop below
   default_agent = "claude", -- Symbolic agent name to use on startup
   auto_send_context = false, -- Automatically send new buffer context when entering terminal
-  agent_startup_delay = 1500, -- Milliseconds to wait before sending /color command on startup
+  agent_startup_delay = 1500, -- Minimum ms before the startup /color command may be sent
+  agent_ready_timeout = 300000, -- Max ms to wait for the agent's input box before giving up (0 = forever)
   show_header = true,         -- Show the keybind instruction header above the terminal
   scroll_start_line = 9,      -- Line to jump to when first entering scroll mode
   idle_timeout_ms = 8000,     -- ms of silence after activity before flagging (0 = disabled)
@@ -926,6 +927,131 @@ function create_window_layout()
   M._record_width_ratio()
 end
 
+-- Waiting for the agent to be ready to be typed into.
+--
+-- The startup `/color` used to go out on a fixed timer, which meant a bare
+-- <CR> was delivered into whatever the agent happened to be showing at that
+-- moment.  In a directory Claude Code has not been trusted with yet, that is
+-- the trust dialog -- whose default-highlighted row is "No, exit".  The agent
+-- answered "no" to itself, exited 1, and the `on_exit` below tore the layout
+-- down, which read as the plugin crashing a second after startup.
+--
+-- So nothing is typed until the buffer actually shows an input box.
+
+local RULE_MIN = 10  -- a real box rule spans the pane; 10 cells is far short of one
+
+--- True for a horizontal box rule -- the border Claude Code draws above and
+--- below its input box.  Recognised as "enough rule glyphs and nothing
+--- wordlike" rather than an exact string, so a plain `───` rule and a
+--- `╭──╮` rounded border both qualify.
+---
+--- Counted with two literal gsubs rather than a `[..]` class: a multi-byte
+--- glyph in a Lua character class is a set of BYTES, not of glyphs, so the
+--- class would also match the shared lead bytes and count each rule character
+--- several times over.
+local function is_box_rule(line)
+  if line:find("%w") then return false end
+  local _, thin = line:gsub("─", "")
+  local _, thick = line:gsub("━", "")
+  return thin + thick >= RULE_MIN
+end
+
+--- Whether the agent is showing its input box, and is therefore ready to be
+--- typed into.
+---
+--- The sandwich -- a prompt marker with a rule directly above AND below it --
+--- is what makes this safe.  Claude Code's dialogs draw a prompt marker too
+--- (the trust dialog's highlighted row is `❯ No, exit`, and the first-run
+--- theme picker's is `❯ 2. Dark mode`), but a dialog's marker is a menu row
+--- with no rule beneath it, so it can never be read as the input box.
+---
+--- Deliberately not also requiring the box to be EMPTY, which would be a nice
+--- guard against splicing into something the user was mid-way through typing:
+--- an idle box is padded with U+00A0 and often carries a greyed-out hint, and
+--- `❯\194\160Try "write a test for <filepath>"` is byte-for-byte the same
+--- shape as `❯\194\160hello there`.  Since the hint cannot be told from real
+--- input, requiring emptiness would just mean the colour is silently never
+--- applied whenever a hint happens to be showing.
+local function has_input_box(buf)
+  local ok, lines = pcall(vim.api.nvim_buf_get_lines, buf, 0, -1, false)
+  if not ok then return false end
+  -- Bottom-up, so the live box wins over any left behind in the scrollback.
+  for i = #lines - 1, 2, -1 do
+    if lines[i]:match("^%s*❯") and is_box_rule(lines[i - 1]) and is_box_rule(lines[i + 1]) then
+      return true
+    end
+  end
+  return false
+end
+
+--- Type `text` into agent `name` as soon as its input box is on screen.
+---
+--- `config.agent_startup_delay` is still honoured, as a floor rather than as
+--- the whole answer: nothing is sent before it elapses, and nothing is sent
+--- after it either until the box is actually there.  Waiting is capped by
+--- `config.agent_ready_timeout` (0 waits indefinitely), which is generous
+--- because an untrusted directory parks the agent on its trust dialog for as
+--- long as the user takes to answer it -- and the colour should still be
+--- applied once they do.
+---
+--- An agent that never draws a recognisable input box (any CLI that is not
+--- Claude Code) simply never gets typed into, which is the desired outcome:
+--- `/color` is a Claude Code command and injecting it elsewhere was noise.
+local function send_when_ready(name, text)
+  local agent = M.agents[name]
+  if not agent then return end
+
+  local buf, job = agent.buf, agent.job_id
+  local start = vim.uv.now()
+  local timeout = M.config.agent_ready_timeout
+  local timer = vim.uv.new_timer()
+  local done, pending = false, false
+
+  local function finish()
+    if done then return end
+    done = true
+    local a = M.agents[name]
+    if a and a.job_id == job then a.await_ready = nil end
+    if timer then
+      pcall(function() timer:stop() end)
+      pcall(function() timer:close() end)
+      timer = nil
+    end
+  end
+
+  local function attempt()
+    if done then return end
+    local a = M.agents[name]
+    -- Give up if the agent is gone, or was relaunched under the same name --
+    -- the restart starts its own watcher and this one must not type into it.
+    if not a or a.job_id ~= job or not vim.api.nvim_buf_is_valid(buf) then
+      return finish()
+    end
+    local waited = vim.uv.now() - start
+    if waited < M.config.agent_startup_delay then return end
+    if has_input_box(buf) then
+      finish()
+      pcall(vim.fn.chansend, job, text)
+    elseif timeout > 0 and waited >= timeout then
+      finish()
+    end
+  end
+
+  -- Woken by `on_lines`; coalesced through one scheduled call because output
+  -- arrives far faster than the check needs to run, and because on_lines is a
+  -- fast callback where chansend is not safe to call directly.
+  agent.await_ready = function()
+    if done or pending then return end
+    pending = true
+    vim.schedule(function()
+      pending = false
+      attempt()
+    end)
+  end
+
+  timer:start(M.config.agent_startup_delay, 250, vim.schedule_wrap(attempt))
+end
+
 --- Create an agent's terminal buffer and start its job.
 ---@param name string
 ---@param cwd string|nil
@@ -1019,6 +1145,10 @@ local function create_agent(name, cwd, opts)
     on_lines = function(_, _, _, _, lastline, new_lastline)
       local agent = M.agents[name]
       if not agent then return true end  -- detach when agent is gone
+      -- Readiness is checked before the redraw filter below: the repaint that
+      -- replaces a dialog with the input box can leave the line count
+      -- unchanged, and that repaint is exactly the event worth waking for.
+      if agent.await_ready then agent.await_ready() end
       if new_lastline <= lastline then return end  -- no new lines; skip cursor/redraw noise
       agent.last_output_time = vim.uv.now()
       if agent.attention_needed then
@@ -1028,13 +1158,17 @@ local function create_agent(name, cwd, opts)
     end,
   })
 
-  -- Send /color command after the agent has had time to start.
-  -- Delay is configurable via M.config.agent_startup_delay (default 1500ms).
-  vim.defer_fn(function()
-    if M.agents[name] and M.agents[name].job_id then
-      vim.fn.chansend(M.agents[name].job_id, "/color " .. color .. "\r")
-    end
-  end, M.config.agent_startup_delay)
+  -- Colour the agent, but only once it is showing an empty input box -- see
+  -- `has_input_box` above for why a fixed timer was unsafe.  The wait is
+  -- open-ended on purpose: an untrusted directory parks the agent on its trust
+  -- dialog for as long as the user takes to answer it, and the colour should
+  -- still be applied once they do.
+  --
+  -- `on_lines` above is the trigger, so the colour goes out on the render that
+  -- reveals the box rather than on the next tick of a poll.  The timer is only
+  -- a backstop for the case where that render is the last one the agent ever
+  -- emits and no further buffer event arrives to check on.
+  send_when_ready(name, "/color " .. color .. "\r")
 
   -- Set buffer name for identification
   vim.api.nvim_buf_set_name(buf, "agent:" .. name)
@@ -2988,5 +3122,6 @@ M._is_under = is_under
 -- Exposed for tests: the resume/fork flag stripping behind every relaunch.
 M._base_command = function(agent) return base_command(agent) end
 M._plugin_root = plugin_root
+M._has_input_box = has_input_box
 
 return M

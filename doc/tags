@@ -8,7 +8,9 @@
 :AgentInstallSkill	aiagent.txt	/*:AgentInstallSkill*
 :AgentList	aiagent.txt	/*:AgentList*
 :AgentList!	aiagent.txt	/*:AgentList!*
+:AgentOnly	aiagent.txt	/*:AgentOnly*
 :AgentOpen	aiagent.txt	/*:AgentOpen*
+:AgentQuit	aiagent.txt	/*:AgentQuit*
 :AgentResetContext	aiagent.txt	/*:AgentResetContext*
 :AgentSendContext	aiagent.txt	/*:AgentSendContext*
 :AgentSendDiagnostics	aiagent.txt	/*:AgentSendDiagnostics*
@@ -24,7 +26,9 @@ aiagent-api	aiagent.txt	/*aiagent-api*
 aiagent-bufferline	aiagent.txt	/*aiagent-bufferline*
 aiagent-commands	aiagent.txt	/*aiagent-commands*
 aiagent-config	aiagent.txt	/*aiagent-config*
+aiagent-config-agent_ready_timeout	aiagent.txt	/*aiagent-config-agent_ready_timeout*
 aiagent-config-agent_startup_delay	aiagent.txt	/*aiagent-config-agent_startup_delay*
+aiagent-config-auto_resize	aiagent.txt	/*aiagent-config-auto_resize*
 aiagent-config-auto_send_context	aiagent.txt	/*aiagent-config-auto_send_context*
 aiagent-config-colors	aiagent.txt	/*aiagent-config-colors*
 aiagent-config-default_agent	aiagent.txt	/*aiagent-config-default_agent*
@@ -34,6 +38,7 @@ aiagent-config-idle_timeout_ms	aiagent.txt	/*aiagent-config-idle_timeout_ms*
 aiagent-config-known_agents	aiagent.txt	/*aiagent-config-known_agents*
 aiagent-config-mcp_max_width	aiagent.txt	/*aiagent-config-mcp_max_width*
 aiagent-config-mcp_scroll	aiagent.txt	/*aiagent-config-mcp_scroll*
+aiagent-config-min_width	aiagent.txt	/*aiagent-config-min_width*
 aiagent-config-scroll_start_line	aiagent.txt	/*aiagent-config-scroll_start_line*
 aiagent-config-show_header	aiagent.txt	/*aiagent-config-show_header*
 aiagent-config-width	aiagent.txt	/*aiagent-config-width*
@@ -61,6 +66,7 @@ aiagent-registry-task	aiagent.txt	/*aiagent-registry-task*
 aiagent-requirements	aiagent.txt	/*aiagent-requirements*
 aiagent-session-load	aiagent.txt	/*aiagent-session-load*
 aiagent-setup	aiagent.txt	/*aiagent-setup*
+aiagent-solo-mode	aiagent.txt	/*aiagent-solo-mode*
 aiagent-worktrees	aiagent.txt	/*aiagent-worktrees*
 aiagent.bufferline_name_formatter()	aiagent.txt	/*aiagent.bufferline_name_formatter()*
 aiagent.close()	aiagent.txt	/*aiagent.close()*
@@ -79,13 +85,16 @@ aiagent.lualine_mcp()	aiagent.txt	/*aiagent.lualine_mcp()*
 aiagent.lualine_mcp_color()	aiagent.txt	/*aiagent.lualine_mcp_color()*
 aiagent.mcp_refresh()	aiagent.txt	/*aiagent.mcp_refresh()*
 aiagent.open()	aiagent.txt	/*aiagent.open()*
+aiagent.open_only()	aiagent.txt	/*aiagent.open_only()*
 aiagent.pending_context_count()	aiagent.txt	/*aiagent.pending_context_count()*
 aiagent.print_list()	aiagent.txt	/*aiagent.print_list()*
 aiagent.prompt_history_close()	aiagent.txt	/*aiagent.prompt_history_close()*
 aiagent.prompt_history_list()	aiagent.txt	/*aiagent.prompt_history_list()*
 aiagent.prompt_history_load_context()	aiagent.txt	/*aiagent.prompt_history_load_context()*
 aiagent.prompt_history_open()	aiagent.txt	/*aiagent.prompt_history_open()*
+aiagent.quit()	aiagent.txt	/*aiagent.quit()*
 aiagent.reset_context()	aiagent.txt	/*aiagent.reset_context()*
+aiagent.resize()	aiagent.txt	/*aiagent.resize()*
 aiagent.send_context()	aiagent.txt	/*aiagent.send_context()*
 aiagent.send_diagnostics()	aiagent.txt	/*aiagent.send_diagnostics()*
 aiagent.send_selection()	aiagent.txt	/*aiagent.send_selection()*

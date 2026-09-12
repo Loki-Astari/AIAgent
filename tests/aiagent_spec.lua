@@ -1168,3 +1168,86 @@ describe("aiagent solo mode", function()
     assert.is_false(aiagent._solo)
   end)
 end)
+
+describe("aiagent._has_input_box", function()
+  local has_input_box = aiagent._has_input_box
+
+  -- The real glyphs, captured from a running Claude Code terminal buffer: the
+  -- prompt marker is U+276F and an idle box is padded with U+00A0, not a space.
+  local RULE = string.rep("\226\148\128", 48)   -- 48 x U+2500
+  local PROMPT = "\226\157\175\194\160"           -- U+276F + U+00A0
+
+  local function buf_with(lines)
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    return buf
+  end
+
+  it("finds the input box: a prompt sandwiched between two rules", function()
+    assert.is_true(has_input_box(buf_with({ "banner", "", RULE, PROMPT, RULE, "status" })))
+  end)
+
+  it("finds it when a hint occupies the box", function()
+    local hinted = PROMPT .. 'Try "write a test for <filepath>"'
+    assert.is_true(has_input_box(buf_with({ RULE, hinted, RULE })))
+  end)
+
+  it("rejects the trust dialog, whose prompt is a menu row", function()
+    -- This is the regression that matters: answering this dialog with a bare
+    -- <CR> selects "No, exit" and the agent quits.
+    assert.is_false(has_input_box(buf_with({
+      RULE,
+      " Accessing workspace:",
+      " Quick safety check: Is this a project you created or one you trust?",
+      "",
+      " \226\157\175 No, exit",
+      "   Yes, I trust this folder",
+      "",
+      " Enter to confirm \194\183 Esc to cancel",
+    })))
+  end)
+
+  it("rejects the first-run theme picker", function()
+    assert.is_false(has_input_box(buf_with({
+      " 1. Auto (match terminal)",
+      " \226\157\175 2. Dark mode",
+      " 3. Light mode",
+    })))
+  end)
+
+  it("rejects a prompt with a rule on only one side", function()
+    assert.is_false(has_input_box(buf_with({ RULE, PROMPT, " some output" })))
+    assert.is_false(has_input_box(buf_with({ " some output", PROMPT, RULE })))
+  end)
+
+  it("ignores an echoed prompt higher up and finds the live box below it", function()
+    -- A submitted command stays on screen as "> /color red" with no rule above
+    -- it; the scan runs bottom-up so the live box is the one that counts.
+    assert.is_true(has_input_box(buf_with({
+      PROMPT .. "/color red",
+      "  \226\142\191  Session color set to: red",
+      "",
+      RULE, PROMPT, RULE,
+    })))
+  end)
+
+  it("does not mistake a short run of rule glyphs for a box border", function()
+    local short = string.rep("\226\148\128", 5)
+    assert.is_false(has_input_box(buf_with({ short, PROMPT, short })))
+  end)
+
+  it("does not treat a line of text as a rule", function()
+    assert.is_false(has_input_box(buf_with({
+      "\226\148\128\226\148\128 Results \226\148\128\226\148\128 and more words here to make it wordlike",
+      PROMPT,
+      "\226\148\128\226\148\128 Results \226\148\128\226\148\128 and more words here to make it wordlike",
+    })))
+  end)
+
+  it("counts rule glyphs, not bytes", function()
+    -- U+2500 is three bytes, so a byte-wise count would call a 4-glyph rule
+    -- (12 bytes) long enough and wrongly accept this.
+    local four = string.rep("\226\148\128", 4)
+    assert.is_false(has_input_box(buf_with({ four, PROMPT, four })))
+  end)
+end)

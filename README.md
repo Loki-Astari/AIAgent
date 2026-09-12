@@ -72,7 +72,8 @@ require("aiagent").setup({
   min_width = 20,             -- Columns the agent pane (and the rest of the layout) never drops below
   default_agent = "claude",   -- Symbolic agent name to use on startup
   auto_send_context = false,  -- Auto-send open buffer paths when entering terminal
-  agent_startup_delay = 1500, -- ms to wait before sending /color on agent start
+  agent_startup_delay = 1500, -- minimum ms before the startup /color is sent
+  agent_ready_timeout = 300000, -- max ms to wait for the agent's input box (0 = wait forever)
   show_header = true,         -- set to false to hide the keybind instruction header
   scroll_start_line = 9,      -- line to jump to when first entering scroll mode
   idle_timeout_ms = 8000,     -- ms of silence after activity before flagging (0 = disabled)

@@ -55,7 +55,7 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 
 The plugin manages state via module-level variables (`M.agents`, `M.current_agent`, `M.win`, `M.header_buf`, `M.header_win`, `M.prev_win`) and uses autocmds for cleanup on QuitPre/VimLeavePre.
 
-Each agent entry in `M.agents[name]` tracks: `buf`, `job_id`, `scroll_mode`, `scroll_pos`, `agent_type`, `command`, `sent_files`, `color`, `worktree` (path or nil), `git_root` (repo root or nil), `slug` (worktree slug or nil), `task` (explicit label or nil), `started` (epoch seconds).
+Each agent entry in `M.agents[name]` tracks: `buf`, `job_id`, `scroll_mode`, `scroll_pos`, `agent_type`, `command`, `sent_files`, `color`, `worktree` (path or nil), `git_root` (repo root or nil), `slug` (worktree slug or nil), `task` (explicit label or nil), `started` (epoch seconds), `await_ready` (startup-injection waker, cleared once it fires; see [Typing Into a Starting Agent](#typing-into-a-starting-agent)).
 
 ## Lualine Integration
 
@@ -103,6 +103,54 @@ Key implementation details in `M.send_diagnostics(agent_name, line1, line2)`:
 - Use `pcall` for all window/buffer operations that might fail during cleanup
 - Terminal jobs require both `chanclose` and `jobstop` for reliable cleanup
 - Window options are set via `nvim_set_option_value` with scope parameters
+
+## Typing Into a Starting Agent
+
+The startup `/color` is not sent on a timer.  It used to be, and in any
+directory Claude Code had not been trusted with yet that was a bug severe
+enough to look like a crash: the agent opens on its "Quick safety check"
+trust dialog, whose default-highlighted row is **`No, exit`**, so the bare
+`\r` at the end of `"/color <name>\r"` answered the dialog for the user.
+Claude Code exited 1, `on_exit` called `M.close`, and the whole column
+vanished about a second and a half after opening.
+
+`send_when_ready()` holds the text until `has_input_box()` says the buffer is
+showing an input box.  The detection is structural, not textual: **a prompt
+marker with a box rule directly above AND below it**.  Dialogs draw a prompt
+marker too — the trust dialog's highlighted row, the first-run theme picker's
+`❯ 2. Dark mode` — but a menu row never has a rule under it, so it can never
+be mistaken for the input box.  The scan runs bottom-up, because a submitted
+command stays on screen as a rule-less `❯ /color red` above the live box.
+
+Non-obvious details:
+
+- **Readiness is checked before `on_lines`' redraw filter.** The repaint that
+  replaces a dialog with the input box can leave the line count unchanged, and
+  that repaint is precisely the event worth waking for.
+- **`config.agent_startup_delay` survives as a floor, not as the answer.**
+  Nothing is sent before it elapses and nothing is sent after it either until
+  the box exists.  `config.agent_ready_timeout` (default 5 min, `0` = forever)
+  caps the wait; it is generous because the user may take a while to answer the
+  trust dialog, and the colour should still land once they do.
+- **The box is not required to be EMPTY.** That would be a nice guard against
+  splicing into a half-typed prompt, but an idle box is padded with U+00A0 and
+  often shows a greyed-out hint, and `❯\194\160Try "write a test…"` is
+  byte-for-byte the same shape as `❯\194\160hello there`.  A hint cannot be
+  told from real input, so requiring emptiness only means the colour is
+  silently never applied whenever a hint happens to be up.
+- **U+00A0 is not `%s`.** Lua's whitespace class is ASCII-only, so a `%S` test
+  on a blank-looking box reports it as occupied.  This cost a debugging round
+  and is why the emptiness check was attempted before it was abandoned.
+- **Rule glyphs are counted with literal `gsub`s, not a `[─━]` class** — a
+  multi-byte glyph in a Lua character class is a set of BYTES, so the class
+  would also match shared lead bytes and count each character several times
+  (the same trap as `[●▶]` in the History Tree notes).  A test asserts a
+  4-glyph rule is rejected even though it is 12 bytes.
+- **A non-Claude CLI simply never gets typed into**, since it never draws this
+  box.  That is the desired outcome: `/color` is a Claude Code command and
+  injecting it into aider or gemini was only ever noise.
+- `M._has_input_box` is exposed so the detector is unit tested against
+  synthetic buffer content, without a window or a live agent.
 
 ## Proportional Resize
 
