@@ -270,9 +270,10 @@ known_agents ~
 
   The layout is not a dead end:
 
-    - Opening a file afterwards gives it its own full-height window down
-      the left and the layout becomes the ordinary one (the agent column
-      returns to |aiagent-config-width|).
+    - Opening a file with :e afterwards gives it its own full-height
+      window down the left and the layout becomes the ordinary one (the
+      agent column returns to |aiagent-config-width|). Other ways of
+      putting a buffer there are refused; see |aiagent-pinned-column|.
     - Closing the agent (|:AgentClose|, |:AgentCloseAll|) hands the pane
       back as an ordinary window with an empty buffer, rather than
       leaving a dead terminal on screen.
@@ -463,6 +464,29 @@ Scroll mode position memory ~
   - First entry: jumps to |aiagent-config-scroll_start_line|
   - Re-entry: restores the last cursor position from the previous
     scroll session
+
+                                                  *aiagent-pinned-column*
+Scroll mode and your own mappings ~
+  Scroll mode is ordinary normal mode in the terminal buffer, so every
+  global normal-mode mapping you have is live in it — including common
+  ones that change the buffer, such as: >vim
+    nnoremap <Tab> :bnext<CR>
+<
+  The agent column's windows therefore have 'winfixbuf' set, so nothing
+  can load a buffer into them: such a mapping reports >
+    E1513: Cannot switch buffer. 'winfixbuf' is enabled
+<
+  and the agent stays on screen. Without it the buffer would replace the
+  terminal, and in solo mode (|:AgentOnly|) the plugin would take that
+  for a file you opened and split the layout apart.
+
+  Exceptions: the plugin's own buffer swaps (switching agents, reloading
+  a session) go past the pin, and while solo an explicit :e typed at the
+  command line is let through, since opening a file is how solo mode
+  ends. A file opened by a picker while solo is refused unless the
+  picker itself honours 'winfixbuf' (most now open a split instead).
+  On Neovim older than 0.10 'winfixbuf' does not exist and none of this
+  applies.
 
 ==============================================================================
 7. LUA API                                                    *aiagent-api*

@@ -1096,6 +1096,12 @@ describe("aiagent solo mode", function()
     return wins
   end
 
+  -- Run a command the way the user does.  CmdlineLeave does not fire for
+  -- vim.cmd, and the solo-mode pin is lifted from there.
+  local function type_cmd(cmd)
+    vim.api.nvim_feedkeys(":" .. cmd .. "\r", "x", false)
+  end
+
   after_each(function()
     aiagent.close_all()
     aiagent.setup({})
@@ -1129,7 +1135,9 @@ describe("aiagent solo mode", function()
     vim.fn.writefile({ "hello" }, file)
 
     vim.api.nvim_set_current_win(aiagent.win)
-    vim.cmd("edit " .. vim.fn.fnameescape(file))
+    -- Typed, not vim.cmd: the column carries 'winfixbuf', and the pin is lifted
+    -- for a :e off CmdlineLeave -- which only a real command line fires.
+    type_cmd("edit " .. vim.fn.fnameescape(file))
     vim.wait(1000, function() return #agent_wins() == 1 end)
 
     assert.equals(1, #agent_wins())
@@ -1140,6 +1148,60 @@ describe("aiagent solo mode", function()
     -- The column shares the tab again, so it goes back to the configured width.
     assert.equals(agent_wins()[1], aiagent.prev_win)
     vim.fn.delete(file)
+  end)
+
+  it("keeps the terminal when a buffer is cycled into the agent window", function()
+    start_solo()
+    local term_buf = aiagent.agents["Solo"].buf
+    -- Something for :bnext to land on, the way an ordinary session accumulates
+    -- buffers.  <Tab> is commonly mapped to it, and in scroll mode -- which is
+    -- normal mode in the terminal buffer -- that mapping is live.
+    local other = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(other, vim.fn.tempname() .. ".txt")
+
+    vim.api.nvim_set_current_win(aiagent.win)
+    local ok = pcall(type_cmd, "bnext")
+    vim.wait(100)
+
+    assert.is_true(ok)  -- the E1513 is the user's to see, not a thrown error
+    assert.equals(term_buf, vim.api.nvim_win_get_buf(aiagent.win))
+    assert.same({}, agent_wins())
+    assert.is_true(aiagent._solo)
+    pcall(vim.api.nvim_buf_delete, other, { force = true })
+  end)
+
+  it("survives a <Tab> -> :bnext mapping pressed in scroll mode", function()
+    start_solo()
+    local term_buf = aiagent.agents["Solo"].buf
+    local other = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(other, vim.fn.tempname() .. ".txt")
+    -- The reported case, end to end: a global mapping fired from scroll mode.
+    vim.keymap.set("n", "<Tab>", ":bnext<CR>", { noremap = true, silent = true })
+
+    vim.api.nvim_set_current_win(aiagent.win)
+    aiagent.agents["Solo"].scroll_mode = true
+    pcall(vim.api.nvim_feedkeys, "\t", "x", false)
+    vim.wait(100)
+
+    assert.equals(term_buf, vim.api.nvim_win_get_buf(aiagent.win))
+    assert.same({}, agent_wins())
+    assert.is_true(aiagent._solo)
+    pcall(vim.keymap.del, "n", "<Tab>")
+    pcall(vim.api.nvim_buf_delete, other, { force = true })
+  end)
+
+  it("re-pins the column when a :e never lands", function()
+    start_solo()
+    local term_buf = aiagent.agents["Solo"].buf
+    vim.api.nvim_set_current_win(aiagent.win)
+
+    -- The pin is lifted for a :e; a cancelled one must not leave it lifted.
+    pcall(type_cmd, "edit")   -- no filename: reloads, nothing lands
+    vim.wait(100)
+
+    assert.is_true(vim.api.nvim_get_option_value("winfixbuf", { win = aiagent.win }))
+    assert.equals(term_buf, vim.api.nvim_win_get_buf(aiagent.win))
+    assert.is_true(aiagent._solo)
   end)
 
   it("maps <C-\\><C-x> on the agent buffer in both terminal and scroll mode", function()
@@ -1166,6 +1228,68 @@ describe("aiagent solo mode", function()
     assert.equals("", vim.api.nvim_get_option_value("buftype", { buf = buf }))
     assert.equals("", vim.api.nvim_get_option_value("winbar", { win = win }))
     assert.is_false(aiagent._solo)
+  end)
+end)
+
+describe("aiagent pinned column", function()
+  -- Scroll mode is normal mode in the terminal buffer, so every global
+  -- normal-mode mapping is live there -- including the very common
+  -- <Tab> -> :bnext.  'winfixbuf' is what stops one loading a file into the
+  -- agent column; the plugin's own buffer swaps go past it via set_layout_buf.
+  local function start(name)
+    aiagent.close_all()
+    aiagent.setup({
+      known_agents = { fake = "cat" },
+      agent_startup_delay = 600000,
+      idle_timeout_ms = 0,
+    })
+    aiagent.set("fake")
+    vim.cmd("enew")
+    vim.cmd("only")
+    aiagent.open(name or "Pinned")
+    vim.cmd("stopinsert")
+  end
+
+  after_each(function()
+    aiagent.close_all()
+    aiagent.setup({})
+  end)
+
+  it("pins both panes of the column", function()
+    start()
+    assert.is_true(vim.api.nvim_get_option_value("winfixbuf", { win = aiagent.win }))
+    assert.is_true(vim.api.nvim_get_option_value("winfixbuf", { win = aiagent.header_win }))
+  end)
+
+  it("keeps the terminal when a buffer is cycled into it", function()
+    start()
+    local term_buf = aiagent.agents["Pinned"].buf
+    local other = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(other, vim.fn.tempname() .. ".txt")
+
+    vim.api.nvim_set_current_win(aiagent.win)
+    pcall(vim.cmd, "bnext")
+
+    assert.equals(term_buf, vim.api.nvim_win_get_buf(aiagent.win))
+    pcall(vim.api.nvim_buf_delete, other, { force = true })
+  end)
+
+  it("still switches agents, which is a buffer swap of its own", function()
+    start("One")
+    aiagent.open("Two")
+    vim.wait(200, function() return aiagent.agents["Two"] ~= nil end)
+    assert.equals(aiagent.agents["Two"].buf, vim.api.nvim_win_get_buf(aiagent.win))
+
+    aiagent.switch("One")
+    assert.equals(aiagent.agents["One"].buf, vim.api.nvim_win_get_buf(aiagent.win))
+    -- ...and the pin is back on afterwards.
+    assert.is_true(vim.api.nvim_get_option_value("winfixbuf", { win = aiagent.win }))
+  end)
+
+  it("leaves the editing window unpinned when it hands one back", function()
+    start()
+    -- prev_win is the window the column was split off; it must stay ordinary.
+    assert.is_false(vim.api.nvim_get_option_value("winfixbuf", { win = aiagent.prev_win }))
   end)
 end)
 

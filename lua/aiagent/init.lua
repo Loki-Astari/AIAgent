@@ -181,6 +181,75 @@ local LAYOUT_WIN_OPTS = {
   "number", "relativenumber", "signcolumn", "list", "spell", "colorcolumn", "winbar",
 }
 
+--- Pin or unpin a layout window's buffer.
+---
+--- 'winfixbuf' is what keeps a stray :bnext (or a bufferline click, a quickfix
+--- jump, :bd) from loading an ordinary file into the agent column.  Without it
+--- any global normal-mode mapping is live the moment the user enters scroll
+--- mode -- scroll mode *is* normal mode in the terminal buffer -- and a buffer
+--- that lands in M.win looks to the solo-mode BufWinEnter handler exactly like
+--- a file the user opened, so the column splits itself apart.
+---
+--- pcall'd rather than guarded on a version check: 'winfixbuf' arrived in
+--- Neovim 0.10, and on anything older the pin is simply not available.
+---@param win number|nil
+---@param fixed boolean
+local function fix_layout_buf(win, fixed)
+  if not (win and vim.api.nvim_win_is_valid(win)) then return end
+  pcall(vim.api.nvim_set_option_value, "winfixbuf", fixed, { win = win })
+end
+
+--- Put `buf` in one of the agent column's windows, past its 'winfixbuf' pin.
+---
+--- The pin blocks nvim_win_set_buf as well as the user's commands, so every
+--- swap the plugin makes itself -- switching agents, relaunching one, handing
+--- the column back -- goes through here: lift the pin, set the buffer, restore
+--- it.  Returns false if the window is gone or the swap was refused, which the
+--- callers that already tolerated a failed set_buf keep treating as "give up".
+---@param win number|nil
+---@param buf number
+---@return boolean ok
+local function set_layout_buf(win, buf)
+  if not (win and vim.api.nvim_win_is_valid(win)) then return false end
+
+  local was_fixed = false
+  local ok_get, cur = pcall(vim.api.nvim_get_option_value, "winfixbuf", { win = win })
+  if ok_get then was_fixed = cur end
+
+  if was_fixed then fix_layout_buf(win, false) end
+  local ok = pcall(vim.api.nvim_win_set_buf, win, buf)
+  if was_fixed then fix_layout_buf(win, true) end
+
+  return ok
+end
+
+--- Let one explicit :e land in the pinned column while solo (|:AgentOnly|).
+---
+--- 'winfixbuf' refuses :edit as flatly as it refuses :bnext, and the refusal
+--- comes before any autocmd fires -- no BufNew, no BufAdd, not even a buffer
+--- created -- so there is no hook that could turn it back into the ordinary
+--- layout afterwards.  Solo mode's documented exit is opening a file, so the
+--- pin is lifted for exactly that command and for one tick.
+---
+--- Nothing needs to put the pin back on the success path: the buffer lands,
+--- M._leave_solo hands the column back to the terminal and re-pins it there.
+--- The scheduled check below covers the other paths -- a :e that errored, or
+--- one typed in a window that is not the agent's -- where the column is still
+--- showing the terminal a tick later and was never actually edited into.
+local function solo_allow_edit()
+  if not (M._solo and M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+  if vim.api.nvim_get_current_win() ~= M.win then return end
+
+  fix_layout_buf(M.win, false)
+  vim.schedule(function()
+    if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+    local buf = vim.api.nvim_win_get_buf(M.win)
+    if vim.api.nvim_get_option_value("buftype", { buf = buf }) == "terminal" then
+      fix_layout_buf(M.win, true)
+    end
+  end)
+end
+
 --- Close one of the agent column's windows.
 ---
 --- Neovim refuses to close the last window on a tab page, which is exactly the
@@ -197,6 +266,10 @@ local function close_layout_win(win)
     pcall(vim.api.nvim_win_close, win, true)
     return
   end
+
+  -- The pane is handed back as an ordinary window, so the pin comes off first:
+  -- the :enew below is a buffer switch and 'winfixbuf' would refuse it.
+  fix_layout_buf(win, false)
 
   -- A pane still showing one of ours (the terminal, or the nofile header) needs
   -- a real buffer.  One Neovim has already replaced (buftype "") is left alone,
@@ -381,6 +454,9 @@ function M.setup(opts)
       -- Match :e or :edit with a filename argument (optional !)
       if cmd:match("^%s*e!?%s") or cmd:match("^%s*edit!?%s") then
         e_cmd_pending = true
+        -- Solo mode's exit is this command; the column is pinned against every
+        -- other way a buffer could replace the terminal.
+        solo_allow_edit()
       else
         e_cmd_pending = false
       end
@@ -831,7 +907,7 @@ function M.switch(name)
   end
 
   M.current_agent = name
-  if not pcall(vim.api.nvim_win_set_buf, M.win, agent.buf) then
+  if not set_layout_buf(M.win, agent.buf) then
     return
   end
   update_header()
@@ -922,6 +998,12 @@ function create_window_layout()
     vim.api.nvim_win_set_height(M.win, math.min(M._hidden_win_height, vim.o.lines))
     M._hidden_win_height = nil
   end
+
+  -- Pin the panes last, after every split above has been carved: a split
+  -- copies window-local options, so pinning earlier would hand the pin to the
+  -- windows split off these.
+  fix_layout_buf(M.win, true)
+  fix_layout_buf(M.header_win, true)
 
   M._last_columns = vim.o.columns
   M._record_width_ratio()
@@ -1101,7 +1183,7 @@ local function create_agent(name, cwd, opts)
 
   -- Show buffer in window and switch to it before starting terminal
   -- (termopen runs in the current window, so we must be in M.win)
-  vim.api.nvim_win_set_buf(M.win, buf)
+  set_layout_buf(M.win, buf)
   vim.api.nvim_set_current_win(M.win)
 
   -- Build termopen options
@@ -1614,7 +1696,14 @@ function M._leave_solo(file_buf, term_buf)
     -- inherits the buffer being split, which is the file we are moving out.
     vim.cmd("topleft vsplit")
     M.prev_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(M.win, term_buf)
+    -- A split copies window-local options, so the editing window the user is
+    -- being handed would inherit the column's 'winfixbuf' pin and refuse every
+    -- buffer switch made in it.
+    fix_layout_buf(M.prev_win, false)
+    set_layout_buf(M.win, term_buf)
+    -- The pin was lifted to let the file land (solo_allow_edit); the column is
+    -- back to being a terminal, so put it back.
+    fix_layout_buf(M.win, true)
 
     -- The column's share was 1 while it owned the screen; drop it so resize()
     -- falls back to the configured width now that it shares the tab again.
@@ -2266,7 +2355,7 @@ local function send_selection_to_agent(name, lines, filetype)
 
   -- Switch to the agent and enter insert mode
   M.current_agent = name
-  vim.api.nvim_win_set_buf(M.win, agent.buf)
+  set_layout_buf(M.win, agent.buf)
   vim.api.nvim_set_current_win(M.win)
   update_header()
   vim.cmd("startinsert")
@@ -2399,7 +2488,7 @@ function M.send_diagnostics(agent_name, line1, line2)
     send_to_terminal(name, "\x1bi")
     send_to_terminal(name, text)
     M.current_agent = name
-    vim.api.nvim_win_set_buf(M.win, agent.buf)
+    set_layout_buf(M.win, agent.buf)
     vim.api.nvim_set_current_win(M.win)
     update_header()
     vim.cmd("startinsert")
@@ -2905,7 +2994,7 @@ function M.prompt_history_load_context(session, agent_name)
     send_to_terminal(name, text)
     M.current_agent = name
     if M.win then
-      vim.api.nvim_win_set_buf(M.win, agent.buf)
+      set_layout_buf(M.win, agent.buf)
       vim.api.nvim_set_current_win(M.win)
     end
     update_header()

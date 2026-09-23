@@ -200,7 +200,8 @@ The non-obvious parts are all about the layout no longer having a second window:
   the left with `topleft vsplit` and puts the terminal back — so opening a file is
   how solo mode ends, and the result is the ordinary layout. `topleft`, not
   `leftabove`: the latter splits the terminal pane only, leaving the header
-  spanning the whole screen above both.
+  spanning the whole screen above both. The column is pinned against everything
+  *else* that could put a buffer there; see [Pinned Column](#pinned-column).
 - **The last window on a tab page cannot be closed**, which is exactly this
   layout, so `close_layout_win()` hands the pane back instead: an ordinary buffer
   (only when it still shows one of ours — otherwise the buffer list collects a
@@ -216,6 +217,45 @@ The non-obvious parts are all about the layout no longer having a second window:
 - **`M.hide()` refuses** when `solo_layout()` — closing the column would leave
   Neovim with no window at all. That check is computed from the window list, not
   from `M._solo`, so a window opened some other way (`:vnew`) is accounted for.
+
+## Pinned Column
+
+The agent column's panes carry `'winfixbuf'`, so a buffer cannot be loaded into
+them. Without it the column is one keystroke from falling apart, and the
+keystroke is an ordinary one:
+
+Scroll mode **is** normal mode in the terminal buffer, so every global
+normal-mode mapping is live there — and `<Tab>` → `:bnext` is a common one. The
+buffer it cycles in lands in `M.win`, which to the solo-mode `BufWinEnter`
+handler is indistinguishable from a file the user opened, so the column splits
+itself apart. `:bd`, a bufferline click and a quickfix jump all end the same way.
+The pin refuses all of them with `E1513` and leaves the terminal where it is.
+
+- **`set_layout_buf(win, buf)`** is how the plugin makes its *own* swaps —
+  switching agents, relaunching one, handing the column back — since the pin
+  blocks `nvim_win_set_buf` just as flatly as it blocks the user. It lifts the
+  pin, sets the buffer, restores it. `fix_layout_buf(win, fixed)` is the pin
+  itself, `pcall`'d: `'winfixbuf'` arrived in Neovim 0.10 and on anything older
+  the pin is simply unavailable, not fatal.
+- **The pin goes on last**, at the end of `create_window_layout`, after every
+  split has been carved. A split copies window-local options, so pinning earlier
+  would hand the pin to the windows split *off* these — including the user's
+  editing window. `_leave_solo` unpins `M.prev_win` for the same reason.
+- **`close_layout_win()` unpins before its `:enew`**, or handing the pane back
+  would fail on the buffer it needs to put there.
+- **Solo mode's exit needed an explicit hole.** `'winfixbuf'` refuses `:edit` as
+  flatly as `:bnext`, and the refusal comes *before* any autocmd — no `BufNew`,
+  no `BufAdd`, not even a buffer created — so there is nothing to hook that could
+  turn it back into the ordinary layout. `solo_allow_edit()`, called from the
+  `CmdlineLeave` detector that already watches for `:e`, lifts the pin for that
+  one command and one tick; `_leave_solo` re-pins the column once the terminal is
+  back in it, and a scheduled check re-pins when the `:e` never landed.
+- **Consequences worth knowing.** The hole is cmdline-shaped: a `:e` typed at the
+  prompt (or fed through one by a mapping) opens it, `vim.cmd("edit …")` from Lua
+  does not — which is why the solo spec types its command through
+  `nvim_feedkeys`. A picker that opens a file into the current window while solo
+  now gets `E1513` rather than ending solo mode; pickers that respect
+  `'winfixbuf'` split instead, which is the better outcome anyway.
 
 ## Git Worktree Support
 
